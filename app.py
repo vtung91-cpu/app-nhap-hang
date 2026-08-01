@@ -7,12 +7,40 @@ import json
 # 1. CẤU HÌNH MÀN HÌNH ĐIỆN THOẠI
 st.set_page_config(page_title="App Nhập Hàng", page_icon="📦", layout="centered")
 
+# =========================================================
+# BẢO MẬT: TÍNH NĂNG ĐĂNG NHẬP MẬT KHẨU
+# =========================================================
+MAT_KHAU_APP = "123456"  # 👈 Bạn có thể đổi mật khẩu này thành mật khẩu của riêng bạn!
+
+if "logged_in" not in st.session_state:
+    st.session_state["logged_in"] = False
+
+if not st.session_state["logged_in"]:
+    st.title("🔒 ĐĂNG NHẬP APP")
+    mat_khau_nhap = st.text_input("Vui lòng nhập mật khẩu truy cập:", type="password")
+    if st.button("Đăng Nhập"):
+        if mat_khau_nhap == MAT_KHAU_APP:
+            st.session_state["logged_in"] = True
+            st.rerun()
+        else:
+            st.error("❌ Mật khẩu không đúng!")
+    st.stop()  # Dừng chương trình nếu chưa đăng nhập đúng
+
+# =========================================================
+# NỘI DUNG CHÍNH CỦA APP (Chỉ hiện sau khi nhập đúng mật khẩu)
+# =========================================================
 st.title("📦 QUẢN LÝ NHẬP HÀNG")
+
+# Nút đăng xuất ở góc màn hình
+with st.sidebar:
+    if st.button("🚪 Đăng Xuất"):
+        st.session_state["logged_in"] = False
+        st.rerun()
 
 FILE_LICH_SU = "lich_su_nhap.csv"
 FILE_ANH_XA = "anh_xa_ten.json"
 
-# Hàm định dạng tiền tệ chuẩn: 1.250.000 (không dính chữ đ/VND)
+# Hàm định dạng tiền tệ chuẩn: 1.250.000
 def format_money(val):
     try:
         return f"{float(val):,.0f}".replace(",", ".")
@@ -79,7 +107,7 @@ with tab1:
                         
                         ten_chuan_default = map_anh_xa.get(ten_phu, ten_phu)
                         
-                        # TÍNH CẢNH BÁO GIÁ TĂNG / GIẢM SO VỚI LẦN TRƯỚC
+                        # CẢNH BÁO GIÁ
                         canh_bao_str = ""
                         if not df_lich_su.empty:
                             df_cu = df_lich_su[df_lich_su["Ten_Sp_Chuan"] == ten_chuan_default]
@@ -133,12 +161,11 @@ with tab1:
             st.error(f"Lỗi xử lý file: {e}")
 
 # ---------------------------------------------------------
-# TAB 2: DANH SÁCH HÓA ĐƠN ĐÃ NHẬP (BẤM XEM CHI TIẾT)
+# TAB 2: DANH SÁCH HÓA ĐƠN
 # ---------------------------------------------------------
 with tab2:
     st.subheader("🧾 Danh Sách Hóa Đơn Đã Nhập")
     if not df_lich_su.empty:
-        # Nhóm danh sách Hóa đơn
         df_hd_list = df_lich_su.groupby(["So_HD", "Ten_NCC", "Ngay_HD"]).size().reset_index(name="Tong_Mat_Hang")
         
         for idx, row in df_hd_list.iterrows():
@@ -146,7 +173,6 @@ with tab2:
                 st.write(f"**Tổng số mặt hàng:** {row['Tong_Mat_Hang']} món")
                 st.write("---")
                 
-                # Chi tiết từng mặt hàng thuộc Hóa đơn này
                 df_ct = df_lich_su[(df_lich_su["So_HD"] == row['So_HD']) & (df_lich_su["Ten_NCC"] == row['Ten_NCC'])].copy()
                 df_ct["Giá Thùng"] = df_ct["Don_Gia_Thung"].apply(format_money)
                 df_ct["Giá Nhập Lẻ"] = df_ct["Gia_Nhap_Le"].apply(format_money)
