@@ -1,49 +1,23 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 import os
 import json
 
 # 1. CẤU HÌNH MÀN HÌNH ĐIỆN THOẠI
 st.set_page_config(page_title="App Nhập Hàng", page_icon="📦", layout="centered")
 
-# =========================================================
-# BẢO MẬT: TÍNH NĂNG ĐĂNG NHẬP MẬT KHẨU
-# =========================================================
-MAT_KHAU_APP = "201191"  # 👈 Bạn có thể đổi mật khẩu này thành mật khẩu của riêng bạn!
-
-if "logged_in" not in st.session_state:
-    st.session_state["logged_in"] = False
-
-if not st.session_state["logged_in"]:
-    st.title("🔒 ĐĂNG NHẬP APP")
-    mat_khau_nhap = st.text_input("Vui lòng nhập mật khẩu truy cập:", type="password")
-    if st.button("Đăng Nhập"):
-        if mat_khau_nhap == MAT_KHAU_APP:
-            st.session_state["logged_in"] = True
-            st.rerun()
-        else:
-            st.error("❌ Mật khẩu không đúng!")
-    st.stop()  # Dừng chương trình nếu chưa đăng nhập đúng
-
-# =========================================================
-# NỘI DUNG CHÍNH CỦA APP (Chỉ hiện sau khi nhập đúng mật khẩu)
-# =========================================================
 st.title("📦 QUẢN LÝ NHẬP HÀNG")
-
-# Nút đăng xuất ở góc màn hình
-with st.sidebar:
-    if st.button("🚪 Đăng Xuất"):
-        st.session_state["logged_in"] = False
-        st.rerun()
 
 FILE_LICH_SU = "lich_su_nhap.csv"
 FILE_ANH_XA = "anh_xa_ten.json"
 
-# Hàm định dạng tiền tệ chuẩn: 1.250.000
+# Hàm định dạng tiền tệ: 1.250.000
 def format_money(val):
     try:
-        return f"{float(val):,.0f}".replace(",", ".")
+        val = float(val)
+        if val < 0:
+            return f"-{abs(val):,.0f}".replace(",", ".")
+        return f"{val:,.0f}".replace(",", ".")
     except:
         return "0"
 
@@ -63,15 +37,19 @@ else:
         "Quy_Cach", "So_Luong", "Don_Gia_Thung", "Gia_Nhap_Le"
     ])
 
-# 4 TAB CHỨC NĂNG
-tab1, tab2, tab3, tab4 = st.tabs(["📥 Nhập Hóa Đơn", "🧾 Danh Sách HD", "📊 Biểu Đồ Giá", "📜 Lịch Sử Chi Tiết"])
+# Danh sách tên chuẩn đã từng có trong hệ thống
+danh_sach_ten_chuandaco = list(set(df_lich_su["Ten_Sp_Chuan"].dropna().unique()).union(set(map_anh_xa.values())))
+danh_sach_ten_chuandaco.sort()
+
+# TẠO 3 TAB CHỨC NĂNG
+tab1, tab2, tab3 = st.tabs(["📥 Nhập Hóa Đơn", "🧾 Danh Sách & Sửa HD", "📜 Lịch Sử Chi Tiết"])
 
 # ---------------------------------------------------------
 # TAB 1: NHẬP HÓA ĐƠN
 # ---------------------------------------------------------
 with tab1:
     st.subheader(" Upload File Excel Hóa Đơn")
-    uploaded_file = st.file_uploader("Chọn file Excel từ điện thoại", type=["xlsx", "xls"])
+    uploaded_file = st.file_uploader("Chọn file Excel từ điện thoại", type=["xlsx", "xls"], key="uploader")
     
     if uploaded_file is not None:
         try:
@@ -80,7 +58,7 @@ with tab1:
             ngay_hd = str(df_raw.iloc[3, 1]) if pd.notna(df_raw.iloc[3, 1]) else ""
             so_hd = str(df_raw.iloc[4, 1]) if pd.notna(df_raw.iloc[4, 1]) else ""
             
-            st.success(f"📌 **NCC:** {ten_ncc} | **Số HD:** {so_hd}")
+            st.success(f"📌 **NCC:** {ten_ncc} | **Số HD:** {so_hd} | **Ngày:** {ngay_hd}")
             
             start_row = -1
             for idx, row in df_raw.iterrows():
@@ -107,7 +85,7 @@ with tab1:
                         
                         ten_chuan_default = map_anh_xa.get(ten_phu, ten_phu)
                         
-                        # CẢNH BÁO GIÁ
+                        # CẢNH BÁO GIÁ SO VỚI LẦN TRƯỚC GẦN NHẤT
                         canh_bao_str = ""
                         if not df_lich_su.empty:
                             df_cu = df_lich_su[df_lich_su["Ten_Sp_Chuan"] == ten_chuan_default]
@@ -115,20 +93,29 @@ with tab1:
                                 gia_cu_gan_nhat = float(df_cu.iloc[-1]["Gia_Nhap_Le"])
                                 chenh_lech = gia_nhap_le - gia_cu_gan_nhat
                                 if chenh_lech > 0:
-                                    canh_bao_str = f" 🔴 **TĂNG {format_money(chenh_lech)}** *(Cũ: {format_money(gia_cu_gan_nhat)})*"
+                                    canh_bao_str = f" 🔴 **TĂNG {format_money(chenh_lech)}** *(Đợt trước: {format_money(gia_cu_gan_nhat)})*"
                                 elif chenh_lech < 0:
-                                    canh_bao_str = f" 🟢 **GIẢM {format_money(abs(chenh_lech))}** *(Cũ: {format_money(gia_cu_gan_nhat)})*"
+                                    canh_bao_str = f" 🟢 **GIẢM {format_money(abs(chenh_lech))}** *(Đợt trước: {format_money(gia_cu_gan_nhat)})*"
                                 else:
-                                    canh_bao_str = " ⚪ **Giá không đổi**"
+                                    canh_bao_str = " ⚪ **Không đổi**"
                         
-                        st.markdown(f"**Tên phụ:** `{ten_phu}`")
+                        st.markdown(f"**Tên NPP:** `{ten_phu}`")
                         st.markdown(f"Quy cách: {quy_cach:.0f} | Giá thùng: {format_money(don_gia_thung)} ➔ **Giá lẻ: {format_money(gia_nhap_le)}**{canh_bao_str}")
                         
-                        ten_chuan_user = st.text_input(
-                            label="Tên chính:",
-                            value=ten_chuan_default,
-                            key=f"item_{idx}"
+                        # TẠO DANH SÁCH LỰA CHỌN CÓ TÌM KIẾM GỢI Ý
+                        options_list = [ten_chuan_default] + [x for x in danh_sach_ten_chuandaco if x != ten_chuan_default] + ["➕ Nhập tên mới..."]
+                        
+                        selected_option = st.selectbox(
+                            f"Chọn/Gõ tìm tên chuẩn cho món {idx+1}:",
+                            options=options_list,
+                            key=f"select_{idx}"
                         )
+                        
+                        if selected_option == "➕ Nhập tên mới...":
+                            ten_chuan_user = st.text_input("Gõ tên chuẩn mới:", value="", key=f"input_new_{idx}")
+                        else:
+                            ten_chuan_user = selected_option
+                            
                         st.write("---")
                         
                         items_to_save.append({
@@ -136,7 +123,7 @@ with tab1:
                             "So_HD": so_hd,
                             "Ten_NCC": ten_ncc,
                             "Ten_Phu_NPP": ten_phu,
-                            "Ten_Sp_Chuan": ten_chuan_user,
+                            "Ten_Sp_Chuan": ten_chuan_user if ten_chuan_user.strip() != "" else ten_phu,
                             "Quy_Cach": quy_cach,
                             "So_Luong": so_luong,
                             "Don_Gia_Thung": don_gia_thung,
@@ -157,68 +144,105 @@ with tab1:
                         
                         st.balloons()
                         st.success("✅ ĐÃ LƯU HÓA ĐƠN THÀNH CÔNG!")
+                        st.rerun()
         except Exception as e:
             st.error(f"Lỗi xử lý file: {e}")
 
 # ---------------------------------------------------------
-# TAB 2: DANH SÁCH HÓA ĐƠN
+# TAB 2: DANH SÁCH HÓA ĐƠN & SỬA LỖI NHẬP SAI
 # ---------------------------------------------------------
 with tab2:
-    st.subheader("🧾 Danh Sách Hóa Đơn Đã Nhập")
+    st.subheader("🧾 Danh Sách Hóa Đơn & Chỉnh Sửa")
     if not df_lich_su.empty:
-        df_hd_list = df_lich_su.groupby(["So_HD", "Ten_NCC", "Ngay_HD"]).size().reset_index(name="Tong_Mat_Hang")
+        df_hd_grouped = df_lich_su.groupby(["So_HD", "Ten_NCC", "Ngay_HD"], sort=False).size().reset_index(name="Tong_Mat_Hang")
         
-        for idx, row in df_hd_list.iterrows():
-            with st.expander(f"📄 HD: {row['So_HD']} | NCC: {row['Ten_NCC']} ({row['Ngay_HD']})"):
-                st.write(f"**Tổng số mặt hàng:** {row['Tong_Mat_Hang']} món")
-                st.write("---")
+        for idx, row in df_hd_grouped.iterrows():
+            so_hd_cur = row['So_HD']
+            ncc_cur = row['Ten_NCC']
+            ngay_cur = row['Ngay_HD']
+            
+            with st.expander(f"📄 HD: {so_hd_cur} | NCC: {ncc_cur} ({ngay_cur})"):
+                st.write(f"**Số mặt hàng:** {row['Tong_Mat_Hang']} món")
                 
-                df_ct = df_lich_su[(df_lich_su["So_HD"] == row['So_HD']) & (df_lich_su["Ten_NCC"] == row['Ten_NCC'])].copy()
-                df_ct["Giá Thùng"] = df_ct["Don_Gia_Thung"].apply(format_money)
-                df_ct["Giá Nhập Lẻ"] = df_ct["Gia_Nhap_Le"].apply(format_money)
+                mask_hd = (df_lich_su["So_HD"] == so_hd_cur) & (df_lich_su["Ten_NCC"] == ncc_cur)
+                df_hd_sub = df_lich_su[mask_hd].copy()
                 
-                st.dataframe(
-                    df_ct[["Ten_Sp_Chuan", "Ten_Phu_NPP", "Quy_Cach", "So_Luong", "Giá Thùng", "Giá Nhập Lẻ"]],
-                    use_container_width=True
-                )
+                # TÍNH BIẾN ĐỘNG GIÁ SO VỚI LẦN NHẬP TRƯỚC LIỀN KỀ
+                list_chuech_lech = []
+                for _, r_item in df_hd_sub.iterrows():
+                    sp_c = r_item["Ten_Sp_Chuan"]
+                    gia_c = r_item["Gia_Nhap_Le"]
+                    idx_c = r_item.name
+                    
+                    df_truoc = df_lich_su[(df_lich_su["Ten_Sp_Chuan"] == sp_c) & (df_lich_su.index < idx_c)]
+                    if not df_truoc.empty:
+                        gia_truoc = float(df_truoc.iloc[-1]["Gia_Nhap_Le"])
+                        diff = gia_c - gia_truoc
+                    else:
+                        diff = 0.0
+                    list_chuech_lech.append(diff)
+                
+                df_hd_sub["Biến Động Giá"] = list_chuech_lech
+                
+                # BẢNG HIỂN THỊ (ĐÃ BỎ CỘT TÊN CHUẨN)
+                df_view = pd.DataFrame()
+                df_view["Tên Hàng NPP"] = df_hd_sub["Ten_Phu_NPP"]
+                df_view["Quy Cách"] = df_hd_sub["Quy_Cach"].astype(int)
+                df_view["Số Lượng"] = df_hd_sub["So_Luong"].astype(int)
+                df_view["Giá Thùng"] = df_hd_sub["Don_Gia_Thung"].apply(format_money)
+                df_view["Giá Nhập Lẻ"] = df_hd_sub["Gia_Nhap_Le"].apply(format_money)
+                df_view["Tăng/Giảm (Tiền)"] = df_hd_sub["Biến Động Giá"].apply(lambda x: f"+{format_money(x)}" if x > 0 else (format_money(x) if x < 0 else "0"))
+                
+                # HÀM TÔ MÀU ĐỎ/XANH
+                def style_row(row):
+                    val_str = str(row["Tăng/Giảm (Tiền)"])
+                    if val_str.startswith("+"):
+                        return ['background-color: #ffcccc; color: #990000; font-weight: bold'] * len(row)
+                    elif val_str.startswith("-"):
+                        return ['background-color: #d4edda; color: #155724; font-weight: bold'] * len(row)
+                    return [''] * len(row)
+                
+                st.dataframe(df_view.style.apply(style_row, axis=1), use_container_width=True)
+                
+                # KHU VỰC SỬA LỖI SAI
+                with st.popover(f"✏️ Sửa Quy Cách / Tên Chuẩn cho HD {so_hd_cur}"):
+                    st.write("Chỉnh sửa thông tin:")
+                    with st.form(f"form_edit_{idx}"):
+                        edited_items = []
+                        for sub_idx, sub_row in df_hd_sub.iterrows():
+                            st.caption(f"📌 **{sub_row['Ten_Phu_NPP']}**")
+                            c1, c2 = st.columns(2)
+                            with c1:
+                                new_qc = st.number_input("Quy cách:", value=float(sub_row["Quy_Cach"]), min_value=1.0, key=f"qc_{sub_idx}")
+                            with c2:
+                                new_tc = st.text_input("Tên chuẩn:", value=str(sub_row["Ten_Sp_Chuan"]), key=f"tc_{sub_idx}")
+                            
+                            edited_items.append((sub_idx, new_qc, new_tc))
+                        
+                        btn_save_edit = st.form_submit_button("💾 Cập Nhật Thay Đổi")
+                        if btn_save_edit:
+                            for index_to_update, qc, tc in edited_items:
+                                df_lich_su.loc[index_to_update, "Quy_Cach"] = qc
+                                df_lich_su.loc[index_to_update, "Ten_Sp_Chuan"] = tc
+                                gia_thung_cur = df_lich_su.loc[index_to_update, "Don_Gia_Thung"]
+                                df_lich_su.loc[index_to_update, "Gia_Nhap_Le"] = gia_thung_cur / qc
+                                
+                                ten_phu_c = df_lich_su.loc[index_to_update, "Ten_Phu_NPP"]
+                                map_anh_xa[ten_phu_c] = tc
+                            
+                            df_lich_su.to_csv(FILE_LICH_SU, index=False, encoding="utf-8-sig")
+                            with open(FILE_ANH_XA, "w", encoding="utf-8") as f:
+                                json.dump(map_anh_xa, f, ensure_ascii=False, indent=4)
+                                
+                            st.success("✅ Đã cập nhật xong!")
+                            st.rerun()
     else:
         st.info("Chưa có hóa đơn nào được lưu.")
 
 # ---------------------------------------------------------
-# TAB 3: BIỂU ĐỒ GIÁ
+# TAB 3: LỊCH SỬ CHI TIẾT
 # ---------------------------------------------------------
 with tab3:
-    st.subheader("📈 Biểu Đồ Biến Động Giá Nhập Lẻ")
-    if not df_lich_su.empty:
-        danh_sach_sp = df_lich_su["Ten_Sp_Chuan"].unique()
-        sp_chon = st.selectbox("🎯 Chọn sản phẩm cần xem giá:", danh_sach_sp)
-        
-        df_filtered = df_lich_su[df_lich_su["Ten_Sp_Chuan"] == sp_chon].copy()
-        
-        if not df_filtered.empty:
-            fig = px.line(
-                df_filtered, 
-                x="Ngay_HD", 
-                y="Gia_Nhap_Le", 
-                markers=True,
-                title=f"Lịch sử giá lẻ: {sp_chon}",
-                labels={"Ngay_HD": "Ngày Nhập", "Gia_Nhap_Le": "Giá Nhập Lẻ"},
-                hover_data=["Ten_NCC", "Don_Gia_Thung", "Quy_Cach"]
-            )
-            fig.update_traces(line_color="#1f77b4", line_width=3, marker_size=8)
-            st.plotly_chart(fig, use_container_width=True)
-            
-            df_display = df_filtered[["Ngay_HD", "Ten_NCC", "Don_Gia_Thung", "Quy_Cach", "Gia_Nhap_Le"]].copy()
-            df_display["Don_Gia_Thung"] = df_display["Don_Gia_Thung"].apply(format_money)
-            df_display["Gia_Nhap_Le"] = df_display["Gia_Nhap_Le"].apply(format_money)
-            st.dataframe(df_display, use_container_width=True)
-    else:
-        st.info("Chưa có dữ liệu lịch sử.")
-
-# ---------------------------------------------------------
-# TAB 4: LỊCH SỬ CHI TIẾT
-# ---------------------------------------------------------
-with tab4:
     st.subheader("📜 Toàn bộ lịch sử")
     if not df_lich_su.empty:
         df_all = df_lich_su.copy()
