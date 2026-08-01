@@ -10,7 +10,7 @@ st.set_page_config(page_title="App Nhập Hàng", page_icon="📦", layout="cent
 # =========================================================
 # BẢO MẬT: TÍNH NĂNG ĐĂNG NHẬP MẬT KHẨU
 # =========================================================
-MAT_KHAU_APP = "123456"  # 👈 Bạn có thể đổi mật khẩu này thành mật khẩu của riêng bạn!
+MAT_KHAU_APP = "201191"  # 👈 Bạn có thể đổi mật khẩu này thành mật khẩu của riêng bạn!
 
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
