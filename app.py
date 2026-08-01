@@ -37,12 +37,11 @@ else:
         "Quy_Cach", "So_Luong", "Don_Gia_Thung", "Gia_Nhap_Le"
     ])
 
-# Danh sách tên chuẩn đã từng có trong hệ thống
-danh_sach_ten_chuandaco = list(set(df_lich_su["Ten_Sp_Chuan"].dropna().unique()).union(set(map_anh_xa.values())))
-danh_sach_ten_chuandaco.sort()
+# Danh sách tên chuẩn đã từng lưu trong hệ thống
+danh_sach_ten_chuandaco = sorted(list(set(df_lich_su["Ten_Sp_Chuan"].dropna().astype(str).str.strip().unique()).union(set(map_anh_xa.values()))))
 
 # TẠO 3 TAB CHỨC NĂNG
-tab1, tab2, tab3 = st.tabs(["📥 Nhập Hóa Đơn", "🧾 Danh Sách & Sửa HD", "📜 Lịch Sử Chi Tiết"])
+tab1, tab2, tab3 = st.tabs(["📥 Nhập Hóa Đơn", "🧾 Danh Sách & Tìm HD", "📜 Lịch Sử Chi Tiết"])
 
 # ---------------------------------------------------------
 # TAB 1: NHẬP HÓA ĐƠN
@@ -102,19 +101,21 @@ with tab1:
                         st.markdown(f"**Tên NPP:** `{ten_phu}`")
                         st.markdown(f"Quy cách: {quy_cach:.0f} | Giá thùng: {format_money(don_gia_thung)} ➔ **Giá lẻ: {format_money(gia_nhap_le)}**{canh_bao_str}")
                         
-                        # TẠO DANH SÁCH LỰA CHỌN CÓ TÌM KIẾM GỢI Ý
-                        options_list = [ten_chuan_default] + [x for x in danh_sach_ten_chuandaco if x != ten_chuan_default] + ["➕ Nhập tên mới..."]
+                        # DANH SÁCH GỢI Ý TÊN CHUẨN ĐÃ CÓ
+                        options_goi_y = ["-- [Dùng tên mặc định]: " + ten_chuan_default] + danh_sach_ten_chuandaco + ["➕ Nhập tên mới chưa có trong danh sách..."]
                         
-                        selected_option = st.selectbox(
-                            f"Chọn/Gõ tìm tên chuẩn cho món {idx+1}:",
-                            options=options_list,
-                            key=f"select_{idx}"
+                        chon_ten = st.selectbox(
+                            f"🔍 Gõ tìm tên gợi ý cho món {idx+1}:",
+                            options=options_goi_y,
+                            key=f"sb_{idx}"
                         )
                         
-                        if selected_option == "➕ Nhập tên mới...":
-                            ten_chuan_user = st.text_input("Gõ tên chuẩn mới:", value="", key=f"input_new_{idx}")
+                        if chon_ten == "➕ Nhập tên mới chưa có trong danh sách...":
+                            ten_chuan_user = st.text_input("Gõ tên chuẩn mới:", value="", key=f"inp_{idx}")
+                        elif chon_ten.startswith("-- [Dùng tên mặc định]:"):
+                            ten_chuan_user = ten_chuan_default
                         else:
-                            ten_chuan_user = selected_option
+                            ten_chuan_user = chon_ten
                             
                         st.write("---")
                         
@@ -149,23 +150,56 @@ with tab1:
             st.error(f"Lỗi xử lý file: {e}")
 
 # ---------------------------------------------------------
-# TAB 2: DANH SÁCH HÓA ĐƠN & SỬA LỖI NHẬP SAI
+# TAB 2: DANH SÁCH & TÌM KIẾM HÓA ĐƠN
 # ---------------------------------------------------------
 with tab2:
-    st.subheader("🧾 Danh Sách Hóa Đơn & Chỉnh Sửa")
+    st.subheader("🧾 Danh Sách & Tìm Kiếm Hóa Đơn")
+    
     if not df_lich_su.empty:
+        # BỘ LỌC TÌM KIẾM
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            ds_ncc = ["Tất cả NPP"] + list(df_lich_su["Ten_NCC"].unique())
+            ncc_selected = st.selectbox("Lọc theo NPP:", ds_ncc)
+        with col_f2:
+            sap_xep = st.selectbox("Sắp xếp thời gian:", ["Mới nhất trước", "Cũ nhất trước"])
+            
+        tu_khoa = st.text_input("🔍 Tìm nhanh theo Số HD / Tên món / NPP:", "")
+        
+        # Nhóm danh sách Hóa đơn
         df_hd_grouped = df_lich_su.groupby(["So_HD", "Ten_NCC", "Ngay_HD"], sort=False).size().reset_index(name="Tong_Mat_Hang")
         
+        # Xử lý Sắp xếp
+        if sap_xep == "Mới nhất trước":
+            df_hd_grouped = df_hd_grouped.iloc[::-1].reset_index(drop=True)
+            
+        # Xử lý Lọc NPP
+        if ncc_selected != "Tất cả NPP":
+            df_hd_grouped = df_hd_grouped[df_hd_grouped["Ten_NCC"] == ncc_selected]
+            
+        st.write("---")
+        
+        count_hd = 0
         for idx, row in df_hd_grouped.iterrows():
             so_hd_cur = row['So_HD']
             ncc_cur = row['Ten_NCC']
             ngay_cur = row['Ngay_HD']
             
+            mask_hd = (df_lich_su["So_HD"] == so_hd_cur) & (df_lich_su["Ten_NCC"] == ncc_cur)
+            df_hd_sub = df_lich_su[mask_hd].copy()
+            
+            # Lọc theo Từ khóa tìm kiếm nếu có gõ
+            if tu_khoa.strip() != "":
+                kw = tu_khoa.lower().strip()
+                in_so_hd = kw in str(so_hd_cur).lower()
+                in_ncc = kw in str(ncc_cur).lower()
+                in_sp = df_hd_sub["Ten_Phu_NPP"].astype(str).str.lower().str.contains(kw).any() or df_hd_sub["Ten_Sp_Chuan"].astype(str).str.lower().str.contains(kw).any()
+                if not (in_so_hd or in_ncc or in_sp):
+                    continue # Bỏ qua nếu không khớp từ khóa
+            
+            count_hd += 1
             with st.expander(f"📄 HD: {so_hd_cur} | NCC: {ncc_cur} ({ngay_cur})"):
                 st.write(f"**Số mặt hàng:** {row['Tong_Mat_Hang']} món")
-                
-                mask_hd = (df_lich_su["So_HD"] == so_hd_cur) & (df_lich_su["Ten_NCC"] == ncc_cur)
-                df_hd_sub = df_lich_su[mask_hd].copy()
                 
                 # TÍNH BIẾN ĐỘNG GIÁ SO VỚI LẦN NHẬP TRƯỚC LIỀN KỀ
                 list_chuech_lech = []
@@ -184,7 +218,7 @@ with tab2:
                 
                 df_hd_sub["Biến Động Giá"] = list_chuech_lech
                 
-                # BẢNG HIỂN THỊ (ĐÃ BỎ CỘT TÊN CHUẨN)
+                # BẢNG HIỂN THỊ (BỎ CỘT TÊN CHUẨN)
                 df_view = pd.DataFrame()
                 df_view["Tên Hàng NPP"] = df_hd_sub["Ten_Phu_NPP"]
                 df_view["Quy Cách"] = df_hd_sub["Quy_Cach"].astype(int)
@@ -204,7 +238,7 @@ with tab2:
                 
                 st.dataframe(df_view.style.apply(style_row, axis=1), use_container_width=True)
                 
-                # KHU VỰC SỬA LỖI SAI
+                # KHU VỰC SỬA QUY CÁCH / TÊN CHUẨN
                 with st.popover(f"✏️ Sửa Quy Cách / Tên Chuẩn cho HD {so_hd_cur}"):
                     st.write("Chỉnh sửa thông tin:")
                     with st.form(f"form_edit_{idx}"):
@@ -236,6 +270,8 @@ with tab2:
                                 
                             st.success("✅ Đã cập nhật xong!")
                             st.rerun()
+        if count_hd == 0:
+            st.warning("Không tìm thấy Hóa đơn nào phù hợp!")
     else:
         st.info("Chưa có hóa đơn nào được lưu.")
 
