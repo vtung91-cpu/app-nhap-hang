@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
+import plotly.express as px
+from datetime import datetime
 
 # 1. CẤU HÌNH MÀN HÌNH
 st.set_page_config(page_title="App Nhập Hàng", page_icon="📦", layout="centered")
@@ -58,7 +60,7 @@ def format_money(val):
 
 # Hàm chuẩn hóa chuỗi Ngày / Tháng / Năm đồng nhất (VD: 26/07/2026)
 def format_date_str(date_str):
-    if not date_str or date_str == "nan":
+    if not date_str or str(date_str) == "nan":
         return ""
     try:
         dt = pd.to_datetime(date_str, dayfirst=True, errors='coerce')
@@ -81,6 +83,7 @@ def load_data():
         df_ls["Gia_Nhap_Le"] = pd.to_numeric(df_ls["Gia_Nhap_Le"], errors='coerce').fillna(0)
         df_ls["Quy_Cach"] = pd.to_numeric(df_ls["Quy_Cach"], errors='coerce').fillna(1)
         df_ls["Don_Gia_Thung"] = pd.to_numeric(df_ls["Don_Gia_Thung"], errors='coerce').fillna(0)
+        df_ls["So_Luong"] = pd.to_numeric(df_ls["So_Luong"], errors='coerce').fillna(0)
         
     return df_ls, df_ax
 
@@ -96,12 +99,13 @@ if not df_anh_xa.empty:
 # Danh sách tên chuẩn tổng hợp
 danh_sach_ten_chuandaco = sorted(list(set(df_lich_su["Ten_Sp_Chuan"].dropna().astype(str).unique()).union(set(map_anh_xa.values())))) if not df_lich_su.empty else sorted(list(set(map_anh_xa.values())))
 
-# TẠO 4 TAB CHỨC NĂNG
-tab1, tab2, tab3, tab4 = st.tabs([
+# TẠO 5 TAB CHỨC NĂNG
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📥 Nhập Hóa Đơn", 
     "🧾 Danh Sách & Tìm HD", 
     "🛠 Quản Lý Tên Chuẩn", 
-    "📜 Lịch Sử Chi Tiết"
+    "📜 Lịch Sử Chi Tiết",
+    "📊 Biểu Đồ Thống Kê"
 ])
 
 # ---------------------------------------------------------
@@ -419,3 +423,110 @@ with tab4:
         st.dataframe(df_all, use_container_width=True)
     else:
         st.info("Lịch sử trống.")
+
+# ---------------------------------------------------------
+# TAB 5: BIỂU ĐỒ & THỐNG KÊ (MỚI THÊM)
+# ---------------------------------------------------------
+with tab5:
+    st.subheader("📊 Báo Cáo & Biểu Đồ Nhập Hàng")
+    
+    if not df_lich_su.empty:
+        # Chuẩn hóa cột ngày tháng để tính toán
+        df_stat = df_lich_su.copy()
+        df_stat["Tong_Tien_Dong"] = df_stat["So_Luong"] * df_stat["Don_Gia_Thung"]
+        
+        # Chuyển chuỗi Ngày về kiểu Date chuẩn
+        df_stat["Date_Obj"] = pd.to_datetime(df_stat["Ngay_HD"], dayfirst=True, errors='coerce')
+        df_stat = df_stat.dropna(subset=["Date_Obj"]) # Bỏ các dòng ngày sai
+        
+        if not df_stat.empty:
+            now = datetime.now()
+            
+            # CHỌN KHOẢNG THỜI GIAN
+            luat_chon = st.selectbox(
+                "📅 Chọn khoảng thời gian báo cáo:",
+                ["Tháng này", "Tháng trước", "Năm nay", "Năm trước", "Tùy chỉnh ngày"]
+            )
+            
+            # Tính toán Ngày Bắt Đầu và Ngày Kết Thúc
+            if luat_chon == "Tháng này":
+                start_d = datetime(now.year, now.month, 1)
+                end_d = now
+            elif luat_chon == "Tháng trước":
+                first_this_month = datetime(now.year, now.month, 1)
+                end_d = first_this_month - pd.Timedelta(days=1)
+                start_d = datetime(end_d.year, end_d.month, 1)
+            elif luat_chon == "Năm nay":
+                start_d = datetime(now.year, 1, 1)
+                end_d = now
+            elif luat_chon == "Năm trước":
+                start_d = datetime(now.year - 1, 1, 1)
+                end_d = datetime(now.year - 1, 12, 31)
+            else: # Tùy chỉnh ngày
+                col_d1, col_d2 = st.columns(2)
+                with col_d1:
+                    start_input = st.date_input("Từ ngày:", datetime(now.year, now.month, 1))
+                with col_d2:
+                    end_input = st.date_input("Đến ngày:", now)
+                start_d = datetime.combine(start_input, datetime.min.time())
+                end_d = datetime.combine(end_input, datetime.max.time())
+
+            # Lọc dữ liệu theo thời gian đã chọn
+            mask_time = (df_stat["Date_Obj"] >= start_d) & (df_stat["Date_Obj"] <= end_d)
+            df_filtered = df_stat[mask_time].copy()
+
+            st.write("---")
+
+            if not df_filtered.empty:
+                # 1. CÁC THÔNG SỐ TỔNG QUAN (METRICS)
+                tong_chi_phi = df_filtered["Tong_Tien_Dong"].sum()
+                tong_hd = df_filtered["So_HD"].nunique()
+                tong_mon = len(df_filtered)
+
+                col_m1, col_m2, col_m3 = st.columns(3)
+                col_m1.metric("💰 Tổng tiền nhập", f"{format_money(tong_chi_phi)} đ")
+                col_m2.metric("📄 Tổng số HD", f"{tong_hd} hóa đơn")
+                col_m3.metric("📦 Tổng mặt hàng", f"{tong_mon} món")
+
+                st.write("---")
+
+                # 2. BIỂU ĐỒ SỐ TIỀN NHẬP THEO THỜI GIAN
+                st.markdown("##### 📈 Biểu Đồ Nhập Hàng Theo Thời Gian")
+                
+                # Gom nhóm theo ngày
+                df_by_date = df_filtered.groupby(df_filtered["Date_Obj"].dt.strftime("%d/%m/%Y"))["Tong_Tien_Dong"].sum().reset_index()
+                df_by_date.columns = ["Ngày", "Tổng Tiền (Đồng)"]
+                
+                fig_date = px.bar(
+                    df_by_date, 
+                    x="Ngày", 
+                    y="Tổng Tiền (Đồng)",
+                    text_auto=True,
+                    color_discrete_sequence=['#1f77b4']
+                )
+                fig_date.update_traces(texttemplate='%{y:,.0f} đ', textposition='outside')
+                fig_date.update_layout(xaxis_title="Ngày nhập", yaxis_title="Số tiền (VNĐ)", height=400)
+                st.plotly_chart(fig_date, use_container_width=True)
+
+                # 3. BIỂU ĐỒ SỐ TIỀN NHẬP THEO NHÀ CUNG CẤP (NPP)
+                st.markdown("##### 🏢 Tỷ Trọng Nhập Hàng Theo Nhà Cung Cấp (NPP)")
+                df_by_ncc = df_filtered.groupby("Ten_NCC")["Tong_Tien_Dong"].sum().reset_index().sort_values(by="Tong_Tien_Dong", ascending=False)
+                df_by_ncc.columns = ["Nhà Cung Cấp", "Tổng Tiền (Đồng)"]
+
+                fig_ncc = px.bar(
+                    df_by_ncc, 
+                    x="Nhà Cung Cấp", 
+                    y="Tổng Tiền (Đồng)",
+                    color="Nhà Cung Cấp",
+                    text_auto=True
+                )
+                fig_ncc.update_traces(texttemplate='%{y:,.0f} đ', textposition='outside')
+                fig_ncc.update_layout(xaxis_title="Nhà Cung Cấp", yaxis_title="Số tiền (VNĐ)", height=400, showlegend=False)
+                st.plotly_chart(fig_ncc, use_container_width=True)
+
+            else:
+                st.warning("⚠️ Không có dữ liệu hóa đơn nào trong khoảng thời gian này!")
+        else:
+            st.info("Chưa có ngày hợp lệ trong dữ liệu.")
+    else:
+        st.info("Chưa có dữ liệu lịch sử để thống kê biểu đồ.")
