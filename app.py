@@ -7,13 +7,13 @@ st.set_page_config(page_title="App Nhập Hàng", page_icon="📦", layout="cent
 
 st.title("📦 QUẢN LÝ NHẬP HÀNG")
 
-# KẾT NỐI VỚI CƠ SỞ DỮ LIỆU SQLITE (Tự tạo file db nội bộ lưu vĩnh viễn)
+# KẾT NỐI VỚI CƠ SỞ DỮ LIỆU SQLITE (Lưu dữ liệu nội bộ vĩnh viễn)
 DB_FILE = "nhap_hang.db"
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Bảng Lịch sử nhập
+    # Bảng Lịch sử nhập hàng
     c.execute('''
         CREATE TABLE IF NOT EXISTS lich_su (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,7 +28,7 @@ def init_db():
             Gia_Nhap_Le REAL
         )
     ''')
-    # Bảng Ánh xá tên
+    # Bảng Ánh xạ tên
     c.execute('''
         CREATE TABLE IF NOT EXISTS anh_xa (
             Ten_Phu TEXT PRIMARY KEY,
@@ -40,11 +40,13 @@ def init_db():
 
 init_db()
 
+# Hàm làm sạch tên (viết hoa chữ cái đầu, xóa khoảng trắng thừa)
 def clean_name(name_str):
     if not isinstance(name_str, str) or not name_str.strip():
         return "Chưa Rõ"
     return " ".join(name_str.strip().split()).title()
 
+# Hàm định dạng tiền tệ (VD: 100.000)
 def format_money(val):
     try:
         val = float(val)
@@ -53,6 +55,18 @@ def format_money(val):
         return f"{val:,.0f}".replace(",", ".")
     except:
         return "0"
+
+# Hàm chuẩn hóa chuỗi Ngày / Tháng / Năm đồng nhất (VD: 26/07/2026)
+def format_date_str(date_str):
+    if not date_str or date_str == "nan":
+        return ""
+    try:
+        dt = pd.to_datetime(date_str, dayfirst=True, errors='coerce')
+        if pd.notna(dt):
+            return dt.strftime("%d/%m/%Y")
+    except:
+        pass
+    return str(date_str).split(" ")[0]
 
 # Lấy dữ liệu từ SQLite Database
 def load_data():
@@ -72,14 +86,14 @@ def load_data():
 
 df_lich_su, df_anh_xa = load_data()
 
-# Từ điển ánh xạ tên
+# Tạo từ điển bộ nhớ ánh xạ tên
 map_anh_xa = {}
 if not df_anh_xa.empty:
     for _, r in df_anh_xa.iterrows():
         if pd.notna(r.get("Ten_Phu")) and pd.notna(r.get("Ten_Chuan")):
             map_anh_xa[clean_name(str(r["Ten_Phu"]))] = clean_name(str(r["Ten_Chuan"]))
 
-# Danh sách tên chuẩn
+# Danh sách tên chuẩn tổng hợp
 danh_sach_ten_chuandaco = sorted(list(set(df_lich_su["Ten_Sp_Chuan"].dropna().astype(str).unique()).union(set(map_anh_xa.values())))) if not df_lich_su.empty else sorted(list(set(map_anh_xa.values())))
 
 # TẠO 4 TAB CHỨC NĂNG
@@ -103,7 +117,9 @@ with tab1:
             ten_ncc_raw = str(df_raw.iloc[1, 1]) if pd.notna(df_raw.iloc[1, 1]) else "Chưa Rõ"
             ten_ncc = clean_name(ten_ncc_raw)
             
-            ngay_hd = str(df_raw.iloc[3, 1]) if pd.notna(df_raw.iloc[3, 1]) else ""
+            ngay_hd_raw = str(df_raw.iloc[3, 1]) if pd.notna(df_raw.iloc[3, 1]) else ""
+            ngay_hd = format_date_str(ngay_hd_raw)
+            
             so_hd = str(df_raw.iloc[4, 1]) if pd.notna(df_raw.iloc[4, 1]) else ""
             
             st.success(f"📌 **NCC:** {ten_ncc} | **Số HD:** {so_hd} | **Ngày:** {ngay_hd}")
@@ -182,7 +198,7 @@ with tab1:
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ''', items_to_save)
                         
-                        # Lưu ánh xá tên
+                        # Lưu ánh xạ tên
                         for item in items_to_save:
                             c.execute('''
                                 INSERT OR REPLACE INTO anh_xa (Ten_Phu, Ten_Chuan)
@@ -228,7 +244,7 @@ with tab2:
         for idx, row in df_hd_grouped.iterrows():
             so_hd_cur = row['So_HD']
             ncc_cur = row['Ten_NCC']
-            ngay_cur = row['Ngay_HD']
+            ngay_cur = format_date_str(row['Ngay_HD'])
             
             mask_hd = (df_lich_su["So_HD"] == so_hd_cur) & (df_lich_su["Ten_NCC"] == ncc_cur)
             df_hd_sub = df_lich_su[mask_hd].copy()
@@ -397,6 +413,7 @@ with tab4:
     st.subheader("📜 Toàn bộ lịch sử nhập hàng")
     if not df_lich_su.empty:
         df_all = df_lich_su.copy()
+        df_all["Ngay_HD"] = df_all["Ngay_HD"].apply(format_date_str)
         df_all["Don_Gia_Thung"] = df_all["Don_Gia_Thung"].apply(format_money)
         df_all["Gia_Nhap_Le"] = df_all["Gia_Nhap_Le"].apply(format_money)
         st.dataframe(df_all, use_container_width=True)
