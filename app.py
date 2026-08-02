@@ -1,17 +1,44 @@
 import streamlit as st
 import pandas as pd
-from streamlit_gsheets import GSheetsConnection
+import sqlite3
 
 # 1. CẤU HÌNH MÀN HÌNH
 st.set_page_config(page_title="App Nhập Hàng", page_icon="📦", layout="centered")
 
 st.title("📦 QUẢN LÝ NHẬP HÀNG")
 
-# 🔗 ĐƯỜNG LINK GOOGLE SHEET CỦA BẠN (ĐÃ TÍCH HỢP)
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1HF0Z4XDbzkXfj-A5YFVCl2-tqiwPzKnvTM296RIjJdE/edit?usp=sharing"
+# KẾT NỐI VỚI CƠ SỞ DỮ LIỆU SQLITE (Tự tạo file db nội bộ lưu vĩnh viễn)
+DB_FILE = "nhap_hang.db"
 
-# Kết nối Google Sheets
-conn = st.connection("gsheets", type=GSheetsConnection)
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    # Bảng Lịch sử nhập
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS lich_su (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            Ngay_HD TEXT,
+            So_HD TEXT,
+            Ten_NCC TEXT,
+            Ten_Phu_NPP TEXT,
+            Ten_Sp_Chuan TEXT,
+            Quy_Cach REAL,
+            So_Luong REAL,
+            Don_Gia_Thung REAL,
+            Gia_Nhap_Le REAL
+        )
+    ''')
+    # Bảng Ánh xá tên
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS anh_xa (
+            Ten_Phu TEXT PRIMARY KEY,
+            Ten_Chuan TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+init_db()
 
 def clean_name(name_str):
     if not isinstance(name_str, str) or not name_str.strip():
@@ -27,19 +54,13 @@ def format_money(val):
     except:
         return "0"
 
-# Lấy dữ liệu từ Google Sheets
+# Lấy dữ liệu từ SQLite Database
 def load_data():
-    try:
-        df_ls = conn.read(spreadsheet=SHEET_URL, worksheet="Sheet1", ttl=0)
-        df_ax = conn.read(spreadsheet=SHEET_URL, worksheet="AnhXaTen", ttl=0)
-    except Exception as e:
-        df_ls = pd.DataFrame(columns=[
-            "Ngay_HD", "So_HD", "Ten_NCC", "Ten_Phu_NPP", "Ten_Sp_Chuan", 
-            "Quy_Cach", "So_Luong", "Don_Gia_Thung", "Gia_Nhap_Le"
-        ])
-        df_ax = pd.DataFrame(columns=["Ten_Phu", "Ten_Chuan"])
+    conn = sqlite3.connect(DB_FILE)
+    df_ls = pd.read_sql_query("SELECT * FROM lich_su", conn)
+    df_ax = pd.read_sql_query("SELECT * FROM anh_xa", conn)
+    conn.close()
     
-    # Chuẩn hóa kiểu dữ liệu
     if not df_ls.empty:
         df_ls["Ten_NCC"] = df_ls["Ten_NCC"].astype(str).apply(clean_name)
         df_ls["Ten_Sp_Chuan"] = df_ls["Ten_Sp_Chuan"].astype(str).apply(clean_name)
@@ -51,15 +72,15 @@ def load_data():
 
 df_lich_su, df_anh_xa = load_data()
 
-# Tạo từ điển bộ nhớ ánh xạ tên
+# Từ điển ánh xạ tên
 map_anh_xa = {}
 if not df_anh_xa.empty:
     for _, r in df_anh_xa.iterrows():
         if pd.notna(r.get("Ten_Phu")) and pd.notna(r.get("Ten_Chuan")):
             map_anh_xa[clean_name(str(r["Ten_Phu"]))] = clean_name(str(r["Ten_Chuan"]))
 
-# Danh sách tên chuẩn tổng hợp
-danh_sach_ten_chuandaco = sorted(list(set(df_lich_su["Ten_Sp_Chuan"].dropna().astype(str).unique()).union(set(map_anh_xa.values()))))
+# Danh sách tên chuẩn
+danh_sach_ten_chuandaco = sorted(list(set(df_lich_su["Ten_Sp_Chuan"].dropna().astype(str).unique()).union(set(map_anh_xa.values())))) if not df_lich_su.empty else sorted(list(set(map_anh_xa.values())))
 
 # TẠO 4 TAB CHỨC NĂNG
 tab1, tab2, tab3, tab4 = st.tabs([
@@ -147,32 +168,32 @@ with tab1:
                         ten_chuan_user = clean_name(ten_chuan_user) if ten_chuan_user.strip() else clean_name(ten_phu)
                         st.write("---")
                         
-                        items_to_save.append({
-                            "Ngay_HD": ngay_hd,
-                            "So_HD": so_hd,
-                            "Ten_NCC": ten_ncc,
-                            "Ten_Phu_NPP": ten_phu,
-                            "Ten_Sp_Chuan": ten_chuan_user,
-                            "Quy_Cach": quy_cach,
-                            "So_Luong": so_luong,
-                            "Don_Gia_Thung": don_gia_thung,
-                            "Gia_Nhap_Le": gia_nhap_le
-                        })
+                        items_to_save.append((
+                            ngay_hd, so_hd, ten_ncc, ten_phu, ten_chuan_user, quy_cach, so_luong, don_gia_thung, gia_nhap_le
+                        ))
                     
-                    submitted = st.form_submit_button("💾 LƯU VÀO GOOGLE SHEETS")
+                    submitted = st.form_submit_button("💾 LƯU DỮ LIỆU HÓA ĐƠN")
                     if submitted:
-                        df_new = pd.DataFrame(items_to_save)
-                        df_updated_ls = pd.concat([df_lich_su, df_new], ignore_index=True)
+                        conn = sqlite3.connect(DB_FILE)
+                        c = conn.cursor()
+                        # Lưu lịch sử
+                        c.executemany('''
+                            INSERT INTO lich_su (Ngay_HD, So_HD, Ten_NCC, Ten_Phu_NPP, Ten_Sp_Chuan, Quy_Cach, So_Luong, Don_Gia_Thung, Gia_Nhap_Le)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', items_to_save)
                         
+                        # Lưu ánh xá tên
                         for item in items_to_save:
-                            map_anh_xa[clean_name(item["Ten_Phu_NPP"])] = item["Ten_Sp_Chuan"]
+                            c.execute('''
+                                INSERT OR REPLACE INTO anh_xa (Ten_Phu, Ten_Chuan)
+                                VALUES (?, ?)
+                            ''', (clean_name(item[3]), item[4]))
                         
-                        new_ax_rows = [{"Ten_Phu": k, "Ten_Chuan": v} for k, v in map_anh_xa.items()]
-                        conn.update(spreadsheet=SHEET_URL, worksheet="Sheet1", data=df_updated_ls)
-                        conn.update(spreadsheet=SHEET_URL, worksheet="AnhXaTen", data=pd.DataFrame(new_ax_rows))
+                        conn.commit()
+                        conn.close()
                         
                         st.balloons()
-                        st.success("✅ ĐÃ LƯU VĨNH VIỄN VÀO GOOGLE SHEETS!")
+                        st.success("✅ ĐÃ LƯU THÀNH CÔNG!")
                         st.rerun()
         except Exception as e:
             st.error(f"Lỗi xử lý file: {e}")
@@ -268,6 +289,7 @@ with tab2:
                         with st.form(f"form_edit_{idx}"):
                             edited_items = []
                             for sub_idx, sub_row in df_hd_sub.iterrows():
+                                item_id = sub_row["id"]
                                 st.caption(f"📌 **{sub_row['Ten_Phu_NPP']}**")
                                 new_qc = st.number_input("Quy cách:", value=float(sub_row["Quy_Cach"]), min_value=1.0, key=f"qc_{sub_idx}")
                                 
@@ -282,24 +304,28 @@ with tab2:
                                 else:
                                     final_tc = chon_tc
                                     
-                                edited_items.append((sub_idx, new_qc, clean_name(final_tc)))
+                                edited_items.append((item_id, new_qc, clean_name(final_tc), sub_row["Don_Gia_Thung"], sub_row["Ten_Phu_NPP"]))
                                 st.write("---")
                             
                             btn_save_edit = st.form_submit_button("💾 Cập Nhật")
                             if btn_save_edit:
-                                for index_to_update, qc, tc in edited_items:
-                                    df_lich_su.loc[index_to_update, "Quy_Cach"] = qc
-                                    df_lich_su.loc[index_to_update, "Ten_Sp_Chuan"] = tc
-                                    gia_thung_cur = df_lich_su.loc[index_to_update, "Don_Gia_Thung"]
-                                    df_lich_su.loc[index_to_update, "Gia_Nhap_Le"] = gia_thung_cur / qc
+                                conn = sqlite3.connect(DB_FILE)
+                                c = conn.cursor()
+                                for row_id, qc, tc, gia_thung, ten_phu_c in edited_items:
+                                    gia_nhap_le_moi = gia_thung / qc
+                                    c.execute('''
+                                        UPDATE lich_su 
+                                        SET Quy_Cach = ?, Ten_Sp_Chuan = ?, Gia_Nhap_Le = ?
+                                        WHERE id = ?
+                                    ''', (qc, tc, gia_nhap_le_moi, row_id))
                                     
-                                    ten_phu_c = df_lich_su.loc[index_to_update, "Ten_Phu_NPP"]
-                                    map_anh_xa[clean_name(ten_phu_c)] = tc
+                                    c.execute('''
+                                        INSERT OR REPLACE INTO anh_xa (Ten_Phu, Ten_Chuan)
+                                        VALUES (?, ?)
+                                    ''', (clean_name(ten_phu_c), tc))
                                 
-                                new_ax_rows = [{"Ten_Phu": k, "Ten_Chuan": v} for k, v in map_anh_xa.items()]
-                                conn.update(spreadsheet=SHEET_URL, worksheet="Sheet1", data=df_lich_su)
-                                conn.update(spreadsheet=SHEET_URL, worksheet="AnhXaTen", data=pd.DataFrame(new_ax_rows))
-                                
+                                conn.commit()
+                                conn.close()
                                 st.success("✅ Đã cập nhật xong!")
                                 st.rerun()
 
@@ -308,10 +334,11 @@ with tab2:
                     with st.popover("🗑 Xóa Hóa Đơn"):
                         st.warning(f"Bạn có chắc muốn XÓA hẳn HD **{so_hd_cur}**?")
                         if st.button("🔴 Xác nhận Xóa", key=f"btn_del_hd_{idx}"):
-                            # Xóa các dòng thuộc hóa đơn này
-                            df_lich_su_new = df_lich_su[~mask_hd].reset_index(drop=True)
-                            
-                            conn.update(spreadsheet=SHEET_URL, worksheet="Sheet1", data=df_lich_su_new)
+                            conn = sqlite3.connect(DB_FILE)
+                            c = conn.cursor()
+                            c.execute("DELETE FROM lich_su WHERE So_HD = ? AND Ten_NCC = ?", (so_hd_cur, ncc_cur))
+                            conn.commit()
+                            conn.close()
                             st.success(f"🗑 Đã xóa toàn bộ hóa đơn {so_hd_cur}!")
                             st.rerun()
 
@@ -339,17 +366,12 @@ with tab3:
             if st.button("💾 Đổi Tên Hàng Loạt"):
                 ten_moi_clean = clean_name(ten_moi_input)
                 if ten_moi_clean and ten_moi_clean != sp_chon_ql:
-                    if not df_lich_su.empty:
-                        df_lich_su.loc[df_lich_su["Ten_Sp_Chuan"] == sp_chon_ql, "Ten_Sp_Chuan"] = ten_moi_clean
-                    
-                    for k, v in list(map_anh_xa.items()):
-                        if v == sp_chon_ql:
-                            map_anh_xa[k] = ten_moi_clean
-                            
-                    new_ax_rows = [{"Ten_Phu": k, "Ten_Chuan": v} for k, v in map_anh_xa.items()]
-                    conn.update(spreadsheet=SHEET_URL, worksheet="Sheet1", data=df_lich_su)
-                    conn.update(spreadsheet=SHEET_URL, worksheet="AnhXaTen", data=pd.DataFrame(new_ax_rows))
-                    
+                    conn = sqlite3.connect(DB_FILE)
+                    c = conn.cursor()
+                    c.execute("UPDATE lich_su SET Ten_Sp_Chuan = ? WHERE Ten_Sp_Chuan = ?", (ten_moi_clean, sp_chon_ql))
+                    c.execute("UPDATE anh_xa SET Ten_Chuan = ? WHERE Ten_Chuan = ?", (ten_moi_clean, sp_chon_ql))
+                    conn.commit()
+                    conn.close()
                     st.success(f"✅ Đã đổi tên '{sp_chon_ql}' ➔ '{ten_moi_clean}'!")
                     st.rerun()
         
@@ -357,18 +379,12 @@ with tab3:
             st.markdown("##### 🗑 Xóa Tên Chuẩn Vĩnh Viễn")
             st.warning(f"Xóa `{sp_chon_ql}` khỏi gợi ý & đổi các mặt hàng tên này về tên góc NPP.")
             if st.button("❌ Xác Nhận Xóa Tên Này"):
-                # 1. Xóa khỏi bộ nhớ AnhXaTen
-                map_anh_xa = {k: v for k, v in map_anh_xa.items() if v != sp_chon_ql}
-                new_ax_rows = [{"Ten_Phu": k, "Ten_Chuan": v} for k, v in map_anh_xa.items()]
-                
-                # 2. Đổi các tên chuẩn trong lịch sử thành Tên phụ của NPP
-                if not df_lich_su.empty:
-                    mask_del = df_lich_su["Ten_Sp_Chuan"] == sp_chon_ql
-                    df_lich_su.loc[mask_del, "Ten_Sp_Chuan"] = df_lich_su.loc[mask_del, "Ten_Phu_NPP"].apply(clean_name)
-                
-                conn.update(spreadsheet=SHEET_URL, worksheet="Sheet1", data=df_lich_su)
-                conn.update(spreadsheet=SHEET_URL, worksheet="AnhXaTen", data=pd.DataFrame(new_ax_rows))
-                
+                conn = sqlite3.connect(DB_FILE)
+                c = conn.cursor()
+                c.execute("DELETE FROM anh_xa WHERE Ten_Chuan = ?", (sp_chon_ql,))
+                c.execute("UPDATE lich_su SET Ten_Sp_Chuan = Ten_Phu_NPP WHERE Ten_Sp_Chuan = ?", (sp_chon_ql,))
+                conn.commit()
+                conn.close()
                 st.success(f"🗑 Đã xóa hoàn toàn tên '{sp_chon_ql}'!")
                 st.rerun()
     else:
@@ -378,7 +394,7 @@ with tab3:
 # TAB 4: LỊCH SỬ CHI TIẾT
 # ---------------------------------------------------------
 with tab4:
-    st.subheader("📜 Toàn bộ lịch sử trong Google Sheets")
+    st.subheader("📜 Toàn bộ lịch sử nhập hàng")
     if not df_lich_su.empty:
         df_all = df_lich_su.copy()
         df_all["Don_Gia_Thung"] = df_all["Don_Gia_Thung"].apply(format_money)
