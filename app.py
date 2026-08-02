@@ -425,43 +425,46 @@ with tab4:
         st.info("Lịch sử trống.")
 
 # ---------------------------------------------------------
-# TAB 5: BIỂU ĐỒ & THỐNG KÊ (MỚI THÊM)
+# TAB 5: BIỂU ĐỒ & THỐNG KÊ (NÂNG CẤP LOGIC GOM THỜI GIAN)
 # ---------------------------------------------------------
 with tab5:
     st.subheader("📊 Báo Cáo & Biểu Đồ Nhập Hàng")
     
     if not df_lich_su.empty:
-        # Chuẩn hóa cột ngày tháng để tính toán
         df_stat = df_lich_su.copy()
         df_stat["Tong_Tien_Dong"] = df_stat["So_Luong"] * df_stat["Don_Gia_Thung"]
         
         # Chuyển chuỗi Ngày về kiểu Date chuẩn
         df_stat["Date_Obj"] = pd.to_datetime(df_stat["Ngay_HD"], dayfirst=True, errors='coerce')
-        df_stat = df_stat.dropna(subset=["Date_Obj"]) # Bỏ các dòng ngày sai
+        df_stat = df_stat.dropna(subset=["Date_Obj"])
         
         if not df_stat.empty:
             now = datetime.now()
             
-            # CHỌN KHOẢNG THỜI GIAN
             luat_chon = st.selectbox(
                 "📅 Chọn khoảng thời gian báo cáo:",
                 ["Tháng này", "Tháng trước", "Năm nay", "Năm trước", "Tùy chỉnh ngày"]
             )
             
-            # Tính toán Ngày Bắt Đầu và Ngày Kết Thúc
+            group_mode = "day" # Mặc định nhóm theo Ngày ('day' hoặc 'month')
+            
             if luat_chon == "Tháng này":
                 start_d = datetime(now.year, now.month, 1)
                 end_d = now
+                group_mode = "day"
             elif luat_chon == "Tháng trước":
                 first_this_month = datetime(now.year, now.month, 1)
                 end_d = first_this_month - pd.Timedelta(days=1)
                 start_d = datetime(end_d.year, end_d.month, 1)
+                group_mode = "day"
             elif luat_chon == "Năm nay":
                 start_d = datetime(now.year, 1, 1)
                 end_d = now
+                group_mode = "month"
             elif luat_chon == "Năm trước":
                 start_d = datetime(now.year - 1, 1, 1)
                 end_d = datetime(now.year - 1, 12, 31)
+                group_mode = "month"
             else: # Tùy chỉnh ngày
                 col_d1, col_d2 = st.columns(2)
                 with col_d1:
@@ -470,15 +473,22 @@ with tab5:
                     end_input = st.date_input("Đến ngày:", now)
                 start_d = datetime.combine(start_input, datetime.min.time())
                 end_d = datetime.combine(end_input, datetime.max.time())
+                
+                # Nếu khoảng cách chọn <= 31 ngày thì hiện theo Ngày, lớn hơn 31 ngày thì hiện theo Tháng
+                days_diff = (end_d - start_d).days
+                if days_diff <= 31:
+                    group_mode = "day"
+                else:
+                    group_mode = "month"
 
-            # Lọc dữ liệu theo thời gian đã chọn
+            # Lọc dữ liệu theo thời gian
             mask_time = (df_stat["Date_Obj"] >= start_d) & (df_stat["Date_Obj"] <= end_d)
             df_filtered = df_stat[mask_time].copy()
 
             st.write("---")
 
             if not df_filtered.empty:
-                # 1. CÁC THÔNG SỐ TỔNG QUAN (METRICS)
+                # 1. METRICS TỔNG QUAN
                 tong_chi_phi = df_filtered["Tong_Tien_Dong"].sum()
                 tong_hd = df_filtered["So_HD"].nunique()
                 tong_mon = len(df_filtered)
@@ -491,22 +501,34 @@ with tab5:
                 st.write("---")
 
                 # 2. BIỂU ĐỒ SỐ TIỀN NHẬP THEO THỜI GIAN
-                st.markdown("##### 📈 Biểu Đồ Nhập Hàng Theo Thời Gian")
+                if group_mode == "day":
+                    st.markdown("##### 📈 Biểu Đồ Nhập Hàng Theo Từng Ngày")
+                    df_filtered["Time_Key"] = df_filtered["Date_Obj"].dt.strftime("%d/%m/%Y")
+                    # Sắp xếp đúng theo thứ tự thời gian
+                    df_by_time = df_filtered.groupby(["Time_Key", "Date_Obj"])["Tong_Tien_Dong"].sum().reset_index()
+                    df_by_time = df_by_time.sort_values(by="Date_Obj")
+                    x_label = "Ngày nhập"
+                else:
+                    st.markdown("##### 📈 Biểu Đồ Nhập Hàng Theo Từng Tháng")
+                    df_filtered["Time_Key"] = df_filtered["Date_Obj"].dt.strftime("Tháng %m/%Y")
+                    # Tạo cột sắp xếp theo Tháng
+                    df_filtered["YearMonth"] = df_filtered["Date_Obj"].dt.to_period('M')
+                    df_by_time = df_filtered.groupby(["Time_Key", "YearMonth"])["Tong_Tien_Dong"].sum().reset_index()
+                    df_by_time = df_by_time.sort_values(by="YearMonth")
+                    x_label = "Tháng nhập"
                 
-                # Gom nhóm theo ngày
-                df_by_date = df_filtered.groupby(df_filtered["Date_Obj"].dt.strftime("%d/%m/%Y"))["Tong_Tien_Dong"].sum().reset_index()
-                df_by_date.columns = ["Ngày", "Tổng Tiền (Đồng)"]
+                df_by_time.columns = [x_label, "Sort_Key", "Tổng Tiền (Đồng)"]
                 
-                fig_date = px.bar(
-                    df_by_date, 
-                    x="Ngày", 
+                fig_time = px.bar(
+                    df_by_time, 
+                    x=x_label, 
                     y="Tổng Tiền (Đồng)",
                     text_auto=True,
                     color_discrete_sequence=['#1f77b4']
                 )
-                fig_date.update_traces(texttemplate='%{y:,.0f} đ', textposition='outside')
-                fig_date.update_layout(xaxis_title="Ngày nhập", yaxis_title="Số tiền (VNĐ)", height=400)
-                st.plotly_chart(fig_date, use_container_width=True)
+                fig_time.update_traces(texttemplate='%{y:,.0f} đ', textposition='outside')
+                fig_time.update_layout(xaxis_title=x_label, yaxis_title="Số tiền (VNĐ)", height=420)
+                st.plotly_chart(fig_time, use_container_width=True)
 
                 # 3. BIỂU ĐỒ SỐ TIỀN NHẬP THEO NHÀ CUNG CẤP (NPP)
                 st.markdown("##### 🏢 Tỷ Trọng Nhập Hàng Theo Nhà Cung Cấp (NPP)")
@@ -521,7 +543,7 @@ with tab5:
                     text_auto=True
                 )
                 fig_ncc.update_traces(texttemplate='%{y:,.0f} đ', textposition='outside')
-                fig_ncc.update_layout(xaxis_title="Nhà Cung Cấp", yaxis_title="Số tiền (VNĐ)", height=400, showlegend=False)
+                fig_ncc.update_layout(xaxis_title="Nhà Cung Cấp", yaxis_title="Số tiền (VNĐ)", height=420, showlegend=False)
                 st.plotly_chart(fig_ncc, use_container_width=True)
 
             else:
