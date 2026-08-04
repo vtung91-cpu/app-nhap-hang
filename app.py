@@ -12,9 +12,10 @@ st.title("📦 QUẢN LÝ NHẬP HÀNG (LƯU ĐÁM MÂY SUPABASE)")
 # KẾT NỐI VỚI CƠ SỞ DỮ LIỆU POSTGRESQL SUPABASE
 try:
     DB_URL = st.secrets["postgres"]["url"]
-    engine = create_engine(DB_URL)
+    # Thêm pool_pre_ping=True để tự khôi phục kết nối khi bị ngắt
+    engine = create_engine(DB_URL, pool_pre_ping=True)
 except Exception as e:
-    st.error("⚠️ Chưa cấu hình kết nối Supabase trong Streamlit Secrets! Vui lòng kiểm tra lại Bước 3.")
+    st.error("⚠️ Chưa cấu hình kết nối Supabase trong Streamlit Secrets! Vui lòng kiểm tra lại Secrets.")
     st.stop()
 
 # TỰ ĐỘNG KHỞI TẠO BẢNG DỮ LIỆU TRÊN SUPABASE (NẾU CHƯA CÓ)
@@ -114,7 +115,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 # TAB 1: NHẬP HÓA ĐƠN
 # ---------------------------------------------------------
 with tab1:
-    st.subheader(" Upload File Excel Hóa Đơn")
+    st.subheader("📥 Upload File Excel Hóa Đơn")
     uploaded_file = st.file_uploader("Chọn file Excel từ điện thoại", type=["xlsx", "xls"], key="uploader")
     
     if uploaded_file is not None:
@@ -140,7 +141,7 @@ with tab1:
                 df_items = df_raw.iloc[start_row:].dropna(subset=[df_raw.columns[1]]).copy()
                 items_to_save = []
                 st.write("---")
-                st.subheader(" Khớp Tên & Cảnh Báo Giá")
+                st.subheader("🔍 Khớp Tên & Cảnh Báo Giá")
                 
                 with st.form("form_khop_ten"):
                     for idx, row in df_items.iterrows():
