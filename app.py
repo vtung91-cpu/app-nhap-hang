@@ -1,44 +1,47 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
+from sqlalchemy import create_engine, text
 import plotly.express as px
 from datetime import datetime
 
 # 1. CẤU HÌNH MÀN HÌNH
 st.set_page_config(page_title="App Nhập Hàng", page_icon="📦", layout="centered")
 
-st.title("📦 QUẢN LÝ NHẬP HÀNG")
+st.title("📦 QUẢN LÝ NHẬP HÀNG (LƯU ĐÁM MÂY SUPABASE)")
 
-# KẾT NỐI VỚI CƠ SỞ DỮ LIỆU SQLITE (Lưu dữ liệu nội bộ vĩnh viễn)
-DB_FILE = "nhap_hang.db"
+# KẾT NỐI VỚI CƠ SỞ DỮ LIỆU POSTGRESQL SUPABASE
+try:
+    DB_URL = st.secrets["postgres"]["url"]
+    engine = create_engine(DB_URL)
+except Exception as e:
+    st.error("⚠️ Chưa cấu hình kết nối Supabase trong Streamlit Secrets! Vui lòng kiểm tra lại Bước 3.")
+    st.stop()
 
+# TỰ ĐỘNG KHỞI TẠO BẢNG DỮ LIỆU TRÊN SUPABASE (NẾU CHƯA CÓ)
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    # Bảng Lịch sử nhập hàng
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS lich_su (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            Ngay_HD TEXT,
-            So_HD TEXT,
-            Ten_NCC TEXT,
-            Ten_Phu_NPP TEXT,
-            Ten_Sp_Chuan TEXT,
-            Quy_Cach REAL,
-            So_Luong REAL,
-            Don_Gia_Thung REAL,
-            Gia_Nhap_Le REAL
-        )
-    ''')
-    # Bảng Ánh xạ tên
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS anh_xa (
-            Ten_Phu TEXT PRIMARY KEY,
-            Ten_Chuan TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    with engine.begin() as conn:
+        # Bảng Lịch sử nhập hàng
+        conn.execute(text('''
+            CREATE TABLE IF NOT EXISTS lich_su (
+                id SERIAL PRIMARY KEY,
+                Ngay_HD TEXT,
+                So_HD TEXT,
+                Ten_NCC TEXT,
+                Ten_Phu_NPP TEXT,
+                Ten_Sp_Chuan TEXT,
+                Quy_Cach DOUBLE PRECISION,
+                So_Luong DOUBLE PRECISION,
+                Don_Gia_Thung DOUBLE PRECISION,
+                Gia_Nhap_Le DOUBLE PRECISION
+            );
+        '''))
+        # Bảng Ánh xạ tên
+        conn.execute(text('''
+            CREATE TABLE IF NOT EXISTS anh_xa (
+                Ten_Phu TEXT PRIMARY KEY,
+                Ten_Chuan TEXT
+            );
+        '''))
 
 init_db()
 
@@ -70,12 +73,11 @@ def format_date_str(date_str):
         pass
     return str(date_str).split(" ")[0]
 
-# Lấy dữ liệu từ SQLite Database
+# Lấy dữ liệu từ Supabase Database
 def load_data():
-    conn = sqlite3.connect(DB_FILE)
-    df_ls = pd.read_sql_query("SELECT * FROM lich_su", conn)
-    df_ax = pd.read_sql_query("SELECT * FROM anh_xa", conn)
-    conn.close()
+    with engine.connect() as conn:
+        df_ls = pd.read_sql_query(text("SELECT * FROM lich_su ORDER BY id ASC"), conn)
+        df_ax = pd.read_sql_query(text("SELECT * FROM anh_xa"), conn)
     
     if not df_ls.empty:
         df_ls["Ten_NCC"] = df_ls["Ten_NCC"].astype(str).apply(clean_name)
@@ -188,32 +190,37 @@ with tab1:
                         ten_chuan_user = clean_name(ten_chuan_user) if ten_chuan_user.strip() else clean_name(ten_phu)
                         st.write("---")
                         
-                        items_to_save.append((
-                            ngay_hd, so_hd, ten_ncc, ten_phu, ten_chuan_user, quy_cach, so_luong, don_gia_thung, gia_nhap_le
-                        ))
+                        items_to_save.append({
+                            "Ngay_HD": ngay_hd,
+                            "So_HD": so_hd,
+                            "Ten_NCC": ten_ncc,
+                            "Ten_Phu_NPP": ten_phu,
+                            "Ten_Sp_Chuan": ten_chuan_user,
+                            "Quy_Cach": quy_cach,
+                            "So_Luong": so_luong,
+                            "Don_Gia_Thung": don_gia_thung,
+                            "Gia_Nhap_Le": gia_nhap_le
+                        })
                     
                     submitted = st.form_submit_button("💾 LƯU DỮ LIỆU HÓA ĐƠN")
                     if submitted:
-                        conn = sqlite3.connect(DB_FILE)
-                        c = conn.cursor()
-                        # Lưu lịch sử
-                        c.executemany('''
-                            INSERT INTO lich_su (Ngay_HD, So_HD, Ten_NCC, Ten_Phu_NPP, Ten_Sp_Chuan, Quy_Cach, So_Luong, Don_Gia_Thung, Gia_Nhap_Le)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ''', items_to_save)
-                        
-                        # Lưu ánh xạ tên
-                        for item in items_to_save:
-                            c.execute('''
-                                INSERT OR REPLACE INTO anh_xa (Ten_Phu, Ten_Chuan)
-                                VALUES (?, ?)
-                            ''', (clean_name(item[3]), item[4]))
-                        
-                        conn.commit()
-                        conn.close()
+                        with engine.begin() as conn:
+                            # Lưu lịch sử
+                            for item in items_to_save:
+                                conn.execute(text('''
+                                    INSERT INTO lich_su (Ngay_HD, So_HD, Ten_NCC, Ten_Phu_NPP, Ten_Sp_Chuan, Quy_Cach, So_Luong, Don_Gia_Thung, Gia_Nhap_Le)
+                                    VALUES (:Ngay_HD, :So_HD, :Ten_NCC, :Ten_Phu_NPP, :Ten_Sp_Chuan, :Quy_Cach, :So_Luong, :Don_Gia_Thung, :Gia_Nhap_Le)
+                                '''), item)
+                                
+                                # Lưu ánh xạ tên
+                                conn.execute(text('''
+                                    INSERT INTO anh_xa (Ten_Phu, Ten_Chuan)
+                                    VALUES (:Ten_Phu, :Ten_Chuan)
+                                    ON CONFLICT (Ten_Phu) DO UPDATE SET Ten_Chuan = EXCLUDED.Ten_Chuan
+                                '''), {"Ten_Phu": clean_name(item["Ten_Phu_NPP"]), "Ten_Chuan": item["Ten_Sp_Chuan"]})
                         
                         st.balloons()
-                        st.success("✅ ĐÃ LƯU THÀNH CÔNG!")
+                        st.success("✅ ĐÃ LƯU THÀNH CÔNG VÀO SUPABASE!")
                         st.rerun()
         except Exception as e:
             st.error(f"Lỗi xử lý file: {e}")
@@ -302,14 +309,14 @@ with tab2:
                 
                 c_btn1, c_btn2 = st.columns(2)
                 
-                # KHU VỰC SỬA SẢN PHẨM TRONG HÓA ĐƠN
+                # SỬA SẢN PHẨM TRONG HÓA ĐƠN
                 with c_btn1:
                     with st.popover("✏️ Sửa chi tiết HD"):
                         st.write("Chỉnh sửa Tên chuẩn / Quy cách:")
                         with st.form(f"form_edit_{idx}"):
                             edited_items = []
                             for sub_idx, sub_row in df_hd_sub.iterrows():
-                                item_id = sub_row["id"]
+                                item_id = int(sub_row["id"])
                                 st.caption(f"📌 **{sub_row['Ten_Phu_NPP']}**")
                                 new_qc = st.number_input("Quy cách:", value=float(sub_row["Quy_Cach"]), min_value=1.0, key=f"qc_{sub_idx}")
                                 
@@ -324,41 +331,47 @@ with tab2:
                                 else:
                                     final_tc = chon_tc
                                     
-                                edited_items.append((item_id, new_qc, clean_name(final_tc), sub_row["Don_Gia_Thung"], sub_row["Ten_Phu_NPP"]))
+                                edited_items.append({
+                                    "id": item_id, 
+                                    "Quy_Cach": new_qc, 
+                                    "Ten_Sp_Chuan": clean_name(final_tc), 
+                                    "Don_Gia_Thung": sub_row["Don_Gia_Thung"], 
+                                    "Ten_Phu_NPP": clean_name(sub_row["Ten_Phu_NPP"])
+                                })
                                 st.write("---")
                             
                             btn_save_edit = st.form_submit_button("💾 Cập Nhật")
                             if btn_save_edit:
-                                conn = sqlite3.connect(DB_FILE)
-                                c = conn.cursor()
-                                for row_id, qc, tc, gia_thung, ten_phu_c in edited_items:
-                                    gia_nhap_le_moi = gia_thung / qc
-                                    c.execute('''
-                                        UPDATE lich_su 
-                                        SET Quy_Cach = ?, Ten_Sp_Chuan = ?, Gia_Nhap_Le = ?
-                                        WHERE id = ?
-                                    ''', (qc, tc, gia_nhap_le_moi, row_id))
-                                    
-                                    c.execute('''
-                                        INSERT OR REPLACE INTO anh_xa (Ten_Phu, Ten_Chuan)
-                                        VALUES (?, ?)
-                                    ''', (clean_name(ten_phu_c), tc))
+                                with engine.begin() as conn:
+                                    for item in edited_items:
+                                        gia_nhap_le_moi = item["Don_Gia_Thung"] / item["Quy_Cach"]
+                                        conn.execute(text('''
+                                            UPDATE lich_su 
+                                            SET Quy_Cach = :Quy_Cach, Ten_Sp_Chuan = :Ten_Sp_Chuan, Gia_Nhap_Le = :Gia_Nhap_Le
+                                            WHERE id = :id
+                                        '''), {
+                                            "Quy_Cach": item["Quy_Cach"],
+                                            "Ten_Sp_Chuan": item["Ten_Sp_Chuan"],
+                                            "Gia_Nhap_Le": gia_nhap_le_moi,
+                                            "id": item["id"]
+                                        })
+                                        
+                                        conn.execute(text('''
+                                            INSERT INTO anh_xa (Ten_Phu, Ten_Chuan)
+                                            VALUES (:Ten_Phu, :Ten_Chuan)
+                                            ON CONFLICT (Ten_Phu) DO UPDATE SET Ten_Chuan = EXCLUDED.Ten_Chuan
+                                        '''), {"Ten_Phu": item["Ten_Phu_NPP"], "Ten_Chuan": item["Ten_Sp_Chuan"]})
                                 
-                                conn.commit()
-                                conn.close()
                                 st.success("✅ Đã cập nhật xong!")
                                 st.rerun()
 
-                # KHU VỰC XÓA HÓA ĐƠN TRÙNG / SAI
+                # XÓA HÓA ĐƠN
                 with c_btn2:
                     with st.popover("🗑 Xóa Hóa Đơn"):
                         st.warning(f"Bạn có chắc muốn XÓA hẳn HD **{so_hd_cur}**?")
                         if st.button("🔴 Xác nhận Xóa", key=f"btn_del_hd_{idx}"):
-                            conn = sqlite3.connect(DB_FILE)
-                            c = conn.cursor()
-                            c.execute("DELETE FROM lich_su WHERE So_HD = ? AND Ten_NCC = ?", (so_hd_cur, ncc_cur))
-                            conn.commit()
-                            conn.close()
+                            with engine.begin() as conn:
+                                conn.execute(text("DELETE FROM lich_su WHERE So_HD = :So_HD AND Ten_NCC = :Ten_NCC"), {"So_HD": so_hd_cur, "Ten_NCC": ncc_cur})
                             st.success(f"🗑 Đã xóa toàn bộ hóa đơn {so_hd_cur}!")
                             st.rerun()
 
@@ -386,12 +399,9 @@ with tab3:
             if st.button("💾 Đổi Tên Hàng Loạt"):
                 ten_moi_clean = clean_name(ten_moi_input)
                 if ten_moi_clean and ten_moi_clean != sp_chon_ql:
-                    conn = sqlite3.connect(DB_FILE)
-                    c = conn.cursor()
-                    c.execute("UPDATE lich_su SET Ten_Sp_Chuan = ? WHERE Ten_Sp_Chuan = ?", (ten_moi_clean, sp_chon_ql))
-                    c.execute("UPDATE anh_xa SET Ten_Chuan = ? WHERE Ten_Chuan = ?", (ten_moi_clean, sp_chon_ql))
-                    conn.commit()
-                    conn.close()
+                    with engine.begin() as conn:
+                        conn.execute(text("UPDATE lich_su SET Ten_Sp_Chuan = :ten_moi WHERE Ten_Sp_Chuan = :ten_cu"), {"ten_moi": ten_moi_clean, "ten_cu": sp_chon_ql})
+                        conn.execute(text("UPDATE anh_xa SET Ten_Chuan = :ten_moi WHERE Ten_Chuan = :ten_cu"), {"ten_moi": ten_moi_clean, "ten_cu": sp_chon_ql})
                     st.success(f"✅ Đã đổi tên '{sp_chon_ql}' ➔ '{ten_moi_clean}'!")
                     st.rerun()
         
@@ -399,12 +409,9 @@ with tab3:
             st.markdown("##### 🗑 Xóa Tên Chuẩn Vĩnh Viễn")
             st.warning(f"Xóa `{sp_chon_ql}` khỏi gợi ý & đổi các mặt hàng tên này về tên góc NPP.")
             if st.button("❌ Xác Nhận Xóa Tên Này"):
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                c.execute("DELETE FROM anh_xa WHERE Ten_Chuan = ?", (sp_chon_ql,))
-                c.execute("UPDATE lich_su SET Ten_Sp_Chuan = Ten_Phu_NPP WHERE Ten_Sp_Chuan = ?", (sp_chon_ql,))
-                conn.commit()
-                conn.close()
+                with engine.begin() as conn:
+                    conn.execute(text("DELETE FROM anh_xa WHERE Ten_Chuan = :ten_cu"), {"ten_cu": sp_chon_ql})
+                    conn.execute(text("UPDATE lich_su SET Ten_Sp_Chuan = Ten_Phu_NPP WHERE Ten_Sp_Chuan = :ten_cu"), {"ten_cu": sp_chon_ql})
                 st.success(f"🗑 Đã xóa hoàn toàn tên '{sp_chon_ql}'!")
                 st.rerun()
     else:
@@ -425,7 +432,7 @@ with tab4:
         st.info("Lịch sử trống.")
 
 # ---------------------------------------------------------
-# TAB 5: BIỂU ĐỒ & THỐNG KÊ (NÂNG CẤP LOGIC GOM THỜI GIAN)
+# TAB 5: BIỂU ĐỒ & THỐNG KÊ (LOGIC GOM THỜI GIAN THÔNG MINH)
 # ---------------------------------------------------------
 with tab5:
     st.subheader("📊 Báo Cáo & Biểu Đồ Nhập Hàng")
@@ -446,7 +453,7 @@ with tab5:
                 ["Tháng này", "Tháng trước", "Năm nay", "Năm trước", "Tùy chỉnh ngày"]
             )
             
-            group_mode = "day" # Mặc định nhóm theo Ngày ('day' hoặc 'month')
+            group_mode = "day" # Mặc định nhóm theo Ngày
             
             if luat_chon == "Tháng này":
                 start_d = datetime(now.year, now.month, 1)
@@ -474,14 +481,12 @@ with tab5:
                 start_d = datetime.combine(start_input, datetime.min.time())
                 end_d = datetime.combine(end_input, datetime.max.time())
                 
-                # Nếu khoảng cách chọn <= 31 ngày thì hiện theo Ngày, lớn hơn 31 ngày thì hiện theo Tháng
                 days_diff = (end_d - start_d).days
                 if days_diff <= 31:
                     group_mode = "day"
                 else:
                     group_mode = "month"
 
-            # Lọc dữ liệu theo thời gian
             mask_time = (df_stat["Date_Obj"] >= start_d) & (df_stat["Date_Obj"] <= end_d)
             df_filtered = df_stat[mask_time].copy()
 
@@ -504,14 +509,12 @@ with tab5:
                 if group_mode == "day":
                     st.markdown("##### 📈 Biểu Đồ Nhập Hàng Theo Từng Ngày")
                     df_filtered["Time_Key"] = df_filtered["Date_Obj"].dt.strftime("%d/%m/%Y")
-                    # Sắp xếp đúng theo thứ tự thời gian
                     df_by_time = df_filtered.groupby(["Time_Key", "Date_Obj"])["Tong_Tien_Dong"].sum().reset_index()
                     df_by_time = df_by_time.sort_values(by="Date_Obj")
                     x_label = "Ngày nhập"
                 else:
                     st.markdown("##### 📈 Biểu Đồ Nhập Hàng Theo Từng Tháng")
                     df_filtered["Time_Key"] = df_filtered["Date_Obj"].dt.strftime("Tháng %m/%Y")
-                    # Tạo cột sắp xếp theo Tháng
                     df_filtered["YearMonth"] = df_filtered["Date_Obj"].dt.to_period('M')
                     df_by_time = df_filtered.groupby(["Time_Key", "YearMonth"])["Tong_Tien_Dong"].sum().reset_index()
                     df_by_time = df_by_time.sort_values(by="YearMonth")
