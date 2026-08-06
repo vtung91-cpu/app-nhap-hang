@@ -4,426 +4,559 @@ from sqlalchemy import create_engine, text
 import plotly.express as px
 from datetime import datetime
 
-# ---------------------------------------------------------
-# 1. CẤU HÌNH TRANG VÀ KẾT NỐI DATABASE (SUPABASE)
-# ---------------------------------------------------------
-st.set_page_config(page_title="Quản Lý Hóa Đơn & Giá Cả", layout="wide", initial_sidebar_state="expanded")
+# 1. CẤU HÌNH MÀN HÌNH
+st.set_page_config(page_title="App Nhập Hàng", page_icon="📦", layout="centered")
 
-@st.cache_resource
-def get_database_engine():
-    db_url = st.secrets["postgres"]["url"]
-    return create_engine(
-        db_url, 
-        pool_pre_ping=True, 
-        pool_size=10, 
-        max_overflow=20,
-        pool_recycle=300
-    )
+st.title("📦 QUẢN LÝ NHẬP HÀNG (LƯU ĐÁM MÂY SUPABASE)")
 
-engine = get_database_engine()
+# KẾT NỐI VỚI CƠ SỞ DỮ LIỆU POSTGRESQL SUPABASE
+try:
+    DB_URL = st.secrets["postgres"]["url"]
+    engine = create_engine(DB_URL, pool_pre_ping=True)
+except Exception as e:
+    st.error("⚠️ Chưa cấu hình kết nối Supabase trong Streamlit Secrets! Vui lòng kiểm tra lại Secrets.")
+    st.stop()
 
-# Tự động tạo các bảng nếu chưa có
+# TỰ ĐỘNG KHỞI TẠO BẢNG DỮ LIỆU TRÊN SUPABASE (NẾU CHƯA CÓ)
 def init_db():
     with engine.begin() as conn:
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS ten_chuan (
-                id SERIAL PRIMARY KEY,
-                ten_chuan TEXT UNIQUE NOT NULL
-            );
-        """))
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS anh_xa (
-                id SERIAL PRIMARY KEY,
-                ten_npp TEXT UNIQUE NOT NULL,
-                ten_chuan TEXT NOT NULL
-            );
-        """))
-        conn.execute(text("""
+        conn.execute(text('''
             CREATE TABLE IF NOT EXISTS lich_su (
                 id SERIAL PRIMARY KEY,
-                nha_phan_phoi TEXT,
-                so_hoa_don TEXT,
-                ngay_nhap_hang TEXT,
-                ten_sp_npp TEXT,
+                ngay_hd TEXT,
+                so_hd TEXT,
+                ten_ncc TEXT,
+                ten_phu_npp TEXT,
                 ten_sp_chuan TEXT,
-                quy_cach FLOAT,
-                so_luong_thung FLOAT,
-                don_gia_thung FLOAT,
-                don_gia_le FLOAT,
-                tong_tien FLOAT
+                quy_cach DOUBLE PRECISION,
+                so_luong DOUBLE PRECISION,
+                don_gia_thung DOUBLE PRECISION,
+                gia_nhap_le DOUBLE PRECISION
             );
-        """))
+        '''))
+        conn.execute(text('''
+            CREATE TABLE IF NOT EXISTS anh_xa (
+                ten_phu TEXT PRIMARY KEY,
+                ten_chuan TEXT
+            );
+        '''))
 
 init_db()
 
-# --- CÁC HÀM BỔ TRỢ ---
-def find_col(df, possible_names):
-    for col in df.columns:
-        if str(col).strip().lower() in [p.lower() for p in possible_names]:
-            return col
-    return None
+# Hàm làm sạch tên
+def clean_name(name_str):
+    if not isinstance(name_str, str) or not name_str.strip():
+        return "Chưa Rõ"
+    return " ".join(name_str.strip().split()).title()
 
-def parse_excel_invoice(file_path):
-    df_raw = pd.read_excel(file_path, header=None)
-    
-    detected_npp = ""
-    for r in range(min(10, len(df_raw))):
-        row_str = " ".join([str(val) for val in df_raw.iloc[r].dropna().values])
-        if "nhà cung cấp" in row_str.lower() or "npp" in row_str.lower() or "nhà phân phối" in row_str.lower():
-            vals = [str(v).strip() for v in df_raw.iloc[r].dropna().values if str(v).strip()]
-            if len(vals) >= 2:
-                detected_npp = vals[-1]
-            elif ":" in row_str:
-                detected_npp = row_str.split(":")[-1].strip()
-            break
+# Hàm định dạng tiền tệ
+def format_money(val):
+    try:
+        val = float(val)
+        if val < 0:
+            return f"-{abs(val):,.0f}".replace(",", ".")
+        return f"{val:,.0f}".replace(",", ".")
+    except:
+        return "0"
 
-    header_idx = None
-    for r in range(min(15, len(df_raw))):
-        row_vals = [str(v).strip().lower() for v in df_raw.iloc[r].dropna().values]
-        if any(k in row_vals for k in ['tên hàng', 'tên sản phẩm', 'tên sp', 'diễn giải']):
-            header_idx = r
-            break
-            
-    if header_idx is None:
-        header_idx = 0
-        
-    df_data = pd.read_excel(file_path, header=header_idx)
-    col_name = find_col(df_data, ['tên hàng', 'tên sản phẩm', 'tên sp', 'diễn giải'])
-    if col_name:
-        df_data = df_data[df_data[col_name].notna()]
-        df_data = df_data[~df_data[col_name].astype(str).str.lower().str.contains('tổng cộng|cộng|thành tiền')]
-        
-    return df_data, detected_npp
+# Hàm chuẩn hóa chuỗi Ngày / Tháng / Năm
+def format_date_str(date_str):
+    if not date_str or str(date_str) == "nan":
+        return ""
+    try:
+        dt = pd.to_datetime(date_str, dayfirst=True, errors='coerce')
+        if pd.notna(dt):
+            return dt.strftime("%d/%m/%Y")
+    except:
+        pass
+    return str(date_str).split(" ")[0]
 
-@st.cache_data(ttl=300, show_spinner=False)
-def load_data_from_db():
+# TỐI ƯU TỐC ĐỘ 1: DÙNG CACHE TẢI DỮ LIỆU TỪ SUPABASE (CHỈ TẢI LẠI KHI CÓ DỮ LIỆU MỚI)
+@st.cache_data(ttl=300)
+def load_data():
     with engine.connect() as conn:
-        try:
-            df_lich_su = pd.read_sql(text("SELECT * FROM lich_su ORDER BY id DESC"), conn)
-        except Exception:
-            df_lich_su = pd.DataFrame()
-
-        try:
-            df_anh_xa = pd.read_sql(text("SELECT * FROM anh_xa"), conn)
-        except Exception:
-            df_anh_xa = pd.DataFrame()
-
-        try:
-            df_chuan = pd.read_sql(text("SELECT * FROM ten_chuan"), conn)
-        except Exception:
-            df_chuan = pd.DataFrame()
+        df_ls = pd.read_sql_query(text("SELECT * FROM lich_su ORDER BY id ASC"), conn)
+        df_ax = pd.read_sql_query(text("SELECT * FROM anh_xa"), conn)
+    
+    if not df_ls.empty:
+        df_ls["ten_ncc"] = df_ls["ten_ncc"].astype(str).apply(clean_name)
+        df_ls["ten_sp_chuan"] = df_ls["ten_sp_chuan"].astype(str).apply(clean_name)
+        df_ls["gia_nhap_le"] = pd.to_numeric(df_ls["gia_nhap_le"], errors='coerce').fillna(0)
+        df_ls["quy_cach"] = pd.to_numeric(df_ls["quy_cach"], errors='coerce').fillna(1)
+        df_ls["don_gia_thung"] = pd.to_numeric(df_ls["don_gia_thung"], errors='coerce').fillna(0)
+        df_ls["so_luong"] = pd.to_numeric(df_ls["so_luong"], errors='coerce').fillna(0)
         
-    if not df_lich_su.empty:
-        col_npp = find_col(df_lich_su, ['nha_phan_phoi', 'npp'])
-        col_ngay = find_col(df_lich_su, ['ngay_nhap_hang', 'ngay_nhap'])
-        col_sp_npp = find_col(df_lich_su, ['ten_sp_npp', 'ten_npp'])
-        col_sp_chuan = find_col(df_lich_su, ['ten_sp_chuan', 'ten_chuan'])
-        col_qc = find_col(df_lich_su, ['quy_cach'])
-        col_sl = find_col(df_lich_su, ['so_luong_thung', 'so_luong'])
-        col_gia_thung = find_col(df_lich_su, ['don_gia_thung', 'don_gia'])
-        col_gia_le = find_col(df_lich_su, ['don_gia_le'])
-        col_tong = find_col(df_lich_su, ['tong_tien', 'thanh_tien'])
+    return df_ls, df_ax
 
-        if col_npp: df_lich_su['nha_phan_phoi'] = df_lich_su[col_npp]
-        if col_ngay: df_lich_su['ngay_nhap_hang'] = df_lich_su[col_ngay]
-        if col_sp_npp: df_lich_su['ten_sp_npp'] = df_lich_su[col_sp_npp]
-        if col_sp_chuan: df_lich_su['ten_sp_chuan'] = df_lich_su[col_sp_chuan]
-        if col_qc: df_lich_su['quy_cach'] = df_lich_su[col_qc]
-        if col_sl: df_lich_su['so_luong_thung'] = df_lich_su[col_sl]
-        if col_gia_thung: df_lich_su['don_gia_thung'] = df_lich_su[col_gia_thung]
-        if col_gia_le: df_lich_su['don_gia_le'] = df_lich_su[col_gia_le]
-        if col_tong: df_lich_su['tong_tien'] = df_lich_su[col_tong]
+df_lich_su, df_anh_xa = load_data()
 
-        if 'ngay_nhap_hang' in df_lich_su.columns:
-            df_lich_su['ngay_dt'] = pd.to_datetime(df_lich_su['ngay_nhap_hang'], format='%d/%m/%Y', errors='coerce')
-        else:
-            df_lich_su['ngay_dt'] = pd.NaT
+# Tạo từ điển bộ nhớ ánh xạ tên
+map_anh_xa = {}
+if not df_anh_xa.empty:
+    for _, r in df_anh_xa.iterrows():
+        if pd.notna(r.get("ten_phu")) and pd.notna(r.get("ten_chuan")):
+            map_anh_xa[clean_name(str(r["ten_phu"]))] = clean_name(str(r["ten_chuan"]))
 
-    return df_lich_su, df_anh_xa, df_chuan
+# Danh sách tên chuẩn tổng hợp
+danh_sach_ten_chuandaco = sorted(list(set(df_lich_su["ten_sp_chuan"].dropna().astype(str).unique()).union(set(map_anh_xa.values())))) if not df_lich_su.empty else sorted(list(set(map_anh_xa.values())))
 
-def clear_app_cache():
-    st.cache_data.clear()
-
-df_lich_su, df_anh_xa, df_chuan = load_data_from_db()
-
-st.title("📦 Quản Lý Nhập Hàng & So Sánh Giá")
-
-# ---------------------------------------------------------
-# 2. HỆ THỐNG TAB CHÍNH
-# ---------------------------------------------------------
+# TẠO 5 TAB CHỨC NĂNG
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📥 Nhập Hóa Đơn", 
-    "📋 Danh Sách Hóa Đơn", 
-    "🏷️ Quản Lý Tên Chuẩn", 
-    "🔍 Chi Tiết & So Sánh Giá", 
-    "📊 Báo Cáo & Biểu Đồ"
+    "🧾 Danh Sách & Tìm HD", 
+    "🛠 Quản Lý Tên Chuẩn", 
+    "📜 Lịch Sử Chi Tiết",
+    "📊 Biểu Đồ Thống Kê"
 ])
 
-# =========================================================
+# ---------------------------------------------------------
 # TAB 1: NHẬP HÓA ĐƠN
-# =========================================================
+# ---------------------------------------------------------
 with tab1:
-    st.subheader("📥 Nhập Hóa Đơn Mới Từ Excel")
+    st.subheader("📥 Upload File Excel Hóa Đơn")
+    uploaded_file = st.file_uploader("Chọn file Excel từ điện thoại", type=["xlsx", "xls"], key="uploader")
     
-    col1, col2 = st.columns(2)
-    with col1:
-        ngay_nhap_selected = st.date_input("Ngày nhập hóa đơn:", value=datetime.now())
-        ngay_nhap_str = ngay_nhap_selected.strftime("%d/%m/%Y")
-    with col2:
-        nha_phan_phoi_user = st.text_input("Tên Nhà Phân Phối (NPP - Tùy chọn):", placeholder="Để trống nếu muốn đọc từ file...")
-        
-    uploaded_file = st.file_uploader("Chọn file Excel hóa đơn (.xlsx, .xls)", type=["xlsx", "xls"])
-    
-    if uploaded_file:
+    if uploaded_file is not None:
         try:
-            df_upload, detected_npp = parse_excel_invoice(uploaded_file)
-            final_npp = nha_phan_phoi_user.strip() if nha_phan_phoi_user.strip() else (detected_npp if detected_npp else "NPP Mới")
+            df_raw = pd.read_excel(uploaded_file)
+            ten_ncc_raw = str(df_raw.iloc[1, 1]) if pd.notna(df_raw.iloc[1, 1]) else "Chưa Rõ"
+            ten_ncc = clean_name(ten_ncc_raw)
             
-            st.success(f"Tải file thành công! [NPP: **{final_npp}** | Ngày: **{ngay_nhap_str}**]")
-            st.dataframe(df_upload.head(10), use_container_width=True)
+            ngay_hd_raw = str(df_raw.iloc[3, 1]) if pd.notna(df_raw.iloc[3, 1]) else ""
+            ngay_hd = format_date_str(ngay_hd_raw)
             
-            if st.button("💾 Lưu Hóa Đơn Vào Hệ Thống", type="primary"):
-                with st.spinner("Đang xử lý dữ liệu..."):
-                    anh_xa_dict = dict(zip(df_anh_xa['ten_npp'], df_anh_xa['ten_chuan'])) if not df_anh_xa.empty and 'ten_npp' in df_anh_xa.columns else {}
-                    
-                    c_sp = find_col(df_upload, ['Tên hàng', 'Tên sản phẩm', 'Tên SP', 'Diễn giải'])
-                    c_qc = find_col(df_upload, ['Quy cách đóng', 'Quy cách', 'Số lượng/Thùng'])
-                    c_sl = find_col(df_upload, ['Số lượng', 'SL'])
-                    c_gia = find_col(df_upload, ['Đơn giá', 'Giá thùng', 'Giá'])
-                    
-                    rows_to_insert = []
-                    for idx, row in df_upload.iterrows():
-                        ten_sp_npp = str(row.get(c_sp, '')).strip() if c_sp else ""
-                        try: quy_cach = float(row.get(c_qc, 1)) if pd.notna(row.get(c_qc)) else 1.0
-                        except: quy_cach = 1.0
-                        
-                        try: so_luong_thung = float(row.get(c_sl, 0)) if pd.notna(row.get(c_sl)) else 0.0
-                        except: so_luong_thung = 0.0
-                        
-                        try: don_gia_thung = float(row.get(c_gia, 0)) if pd.notna(row.get(c_gia)) else 0.0
-                        except: don_gia_thung = 0.0
-                        
-                        if not ten_sp_npp or so_luong_thung <= 0: continue
+            so_hd = str(df_raw.iloc[4, 1]) if pd.notna(df_raw.iloc[4, 1]) else ""
+            
+            st.success(f"📌 **NCC:** {ten_ncc} | **Số HD:** {so_hd} | **Ngày:** {ngay_hd}")
+            
+            start_row = -1
+            for idx, row in df_raw.iterrows():
+                if pd.notna(row.iloc[1]) and "tên hàng" in str(row.iloc[1]).lower():
+                    start_row = idx + 1
+                    break
+            
+            if start_row != -1:
+                df_items = df_raw.iloc[start_row:].dropna(subset=[df_raw.columns[1]]).copy()
+                items_to_save = []
+                anh_xa_to_save = []
+                
+                st.write("---")
+                st.subheader("🔍 Khớp Tên & Cảnh Báo Giá")
+                
+                # Gom dữ liệu giá cũ để tìm kiếm nhanh trong bộ nhớ RAM
+                dict_gia_cu = {}
+                if not df_lich_su.empty:
+                    dict_gia_cu = df_lich_su.groupby("ten_sp_chuan")["gia_nhap_le"].last().to_dict()
+                
+                with st.form("form_khop_ten"):
+                    for idx, row in df_items.iterrows():
+                        ten_phu = str(row.iloc[1]).strip()
+                        if "tổng cộng" in ten_phu.lower() or "số tiền" in ten_phu.lower():
+                            continue
                             
-                        don_gia_le = don_gia_thung / quy_cach if quy_cach > 0 else don_gia_thung
-                        tong_tien = so_luong_thung * don_gia_thung
-                        ten_sp_chuan = anh_xa_dict.get(ten_sp_npp, ten_sp_npp)
-
-                        rows_to_insert.append({
-                            "nha_phan_phoi": final_npp,
-                            "so_hoa_don": "",
-                            "ngay_nhap_hang": ngay_nhap_str,
-                            "ten_sp_npp": ten_sp_npp,
-                            "ten_sp_chuan": ten_sp_chuan,
+                        quy_cach = float(row.iloc[3]) if pd.notna(row.iloc[3]) and float(row.iloc[3]) > 0 else 1.0
+                        so_luong = float(row.iloc[4]) if pd.notna(row.iloc[4]) else 0.0
+                        don_gia_thung = float(row.iloc[5]) if pd.notna(row.iloc[5]) else 0.0
+                        gia_nhap_le = don_gia_thung / quy_cach
+                        
+                        ten_chuan_default = map_anh_xa.get(clean_name(ten_phu), clean_name(ten_phu))
+                        
+                        # CẢNH BÁO GIÁ LÊN / XUỐNG KHÔNG CẦN CHỌC DATABASE
+                        canh_bao_str = ""
+                        gia_cu_gan_nhat = dict_gia_cu.get(ten_chuan_default)
+                        if gia_cu_gan_nhat is not None:
+                            chenh_lech = gia_nhap_le - gia_cu_gan_nhat
+                            if chenh_lech > 0:
+                                canh_bao_str = f" 🔴 **TĂNG {format_money(chenh_lech)}** *(Đợt trước: {format_money(gia_cu_gan_nhat)})*"
+                            elif chenh_lech < 0:
+                                canh_bao_str = f" 🟢 **GIẢM {format_money(abs(chenh_lech))}** *(Đợt trước: {format_money(gia_cu_gan_nhat)})*"
+                            else:
+                                canh_bao_str = " ⚪ **Không đổi**"
+                        
+                        st.markdown(f"**Tên NPP:** `{ten_phu}`")
+                        st.markdown(f"Quy cách: {quy_cach:.0f} | Giá thùng: {format_money(don_gia_thung)} ➔ **Giá lẻ: {format_money(gia_nhap_le)}**{canh_bao_str}")
+                        
+                        options_goi_y = ["-- [Dùng tên mặc định]: " + ten_chuan_default] + danh_sach_ten_chuandaco + ["➕ Nhập tên mới chưa có trong danh sách..."]
+                        
+                        chon_ten = st.selectbox(
+                            f"🔍 Chọn/Tìm tên gợi ý cho món {idx+1}:",
+                            options=options_goi_y,
+                            key=f"sb_{idx}"
+                        )
+                        
+                        if chon_ten == "➕ Nhập tên mới chưa có trong danh sách...":
+                            ten_chuan_user = st.text_input("Gõ tên chuẩn mới:", value="", key=f"inp_{idx}")
+                        elif chon_ten.startswith("-- [Dùng tên mặc định]:"):
+                            ten_chuan_user = ten_chuan_default
+                        else:
+                            ten_chuan_user = chon_ten
+                            
+                        ten_chuan_user = clean_name(ten_chuan_user) if ten_chuan_user.strip() else clean_name(ten_phu)
+                        st.write("---")
+                        
+                        items_to_save.append({
+                            "ngay_hd": ngay_hd,
+                            "so_hd": so_hd,
+                            "ten_ncc": ten_ncc,
+                            "ten_phu_npp": ten_phu,
+                            "ten_sp_chuan": ten_chuan_user,
                             "quy_cach": quy_cach,
-                            "so_luong_thung": so_luong_thung,
+                            "so_luong": so_luong,
                             "don_gia_thung": don_gia_thung,
-                            "don_gia_le": don_gia_le,
-                            "tong_tien": tong_tien
+                            "gia_nhap_le": gia_nhap_le
+                        })
+                        
+                        anh_xa_to_save.append({
+                            "ten_phu": clean_name(ten_phu),
+                            "ten_chuan": ten_chuan_user
                         })
                     
-                    if rows_to_insert:
-                        df_insert = pd.DataFrame(rows_to_insert)
-                        df_insert.to_sql("lich_su", engine, if_exists="append", index=False, method="multi", chunksize=1000)
-                        clear_app_cache()
+                    submitted = st.form_submit_button("💾 LƯU DỮ LIỆU HÓA ĐƠN")
+                    if submitted:
+                        with engine.begin() as conn:
+                            # TỐI ƯU TỐC ĐỘ 2: BATCH INSERT - GỬI TOÀN BỘ TRONG 1 LẦN DUY NHẤT
+                            conn.execute(text('''
+                                INSERT INTO lich_su (ngay_hd, so_hd, ten_ncc, ten_phu_npp, ten_sp_chuan, quy_cach, so_luong, don_gia_thung, gia_nhap_le)
+                                VALUES (:ngay_hd, :so_hd, :ten_ncc, :ten_phu_npp, :ten_sp_chuan, :quy_cach, :so_luong, :don_gia_thung, :gia_nhap_le)
+                            '''), items_to_save)
+                            
+                            conn.execute(text('''
+                                INSERT INTO anh_xa (ten_phu, ten_chuan)
+                                VALUES (:ten_phu, :ten_chuan)
+                                ON CONFLICT (ten_phu) DO UPDATE SET ten_chuan = EXCLUDED.ten_chuan
+                            '''), anh_xa_to_save)
+                        
+                        # Xóa cache để app tải dữ liệu mới nhất
+                        st.cache_data.clear()
                         st.balloons()
-                        st.success(f"Đã lưu thành công {len(rows_to_insert)} sản phẩm!")
+                        st.success("✅ ĐÃ LƯU THÀNH CÔNG VÀO SUPABASE!")
                         st.rerun()
-                    else:
-                        st.warning("Không tìm thấy dòng dữ liệu hợp lệ trong file Excel.")
         except Exception as e:
-            st.error(f"Lỗi xử lý file Excel: {e}")
+            st.error(f"Lỗi xử lý file: {e}")
 
-# =========================================================
-# TAB 2: DANH SÁCH HÓA ĐƠN & XÓA HÓA ĐƠN
-# =========================================================
+# ---------------------------------------------------------
+# TAB 2: DANH SÁCH & TÌM KIẾM HÓA ĐƠN
+# ---------------------------------------------------------
 with tab2:
-    st.subheader("📋 Danh Sách Hóa Đơn Đã Nhập")
+    st.subheader("🧾 Danh Sách & Tìm Kiếm Hóa Đơn")
     
-    if not df_lich_su.empty and 'nha_phan_phoi' in df_lich_su.columns:
-        df_lich_su_temp = df_lich_su.copy()
+    if not df_lich_su.empty:
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            ds_ncc = ["Tất cả NPP"] + sorted(list(df_lich_su["ten_ncc"].unique()))
+            ncc_selected = st.selectbox("Lọc theo NPP:", ds_ncc)
+        with col_f2:
+            sap_xep = st.selectbox("Sắp xếp thời gian:", ["Mới nhất trước", "Cũ nhất trước"])
+            
+        tu_khoa = st.text_input("🔍 Tìm nhanh theo Số HD / Tên món / NPP:", "")
         
-        c_filter1, c_filter2 = st.columns([2, 2])
-        with c_filter1:
-            list_npp = ["Tất cả"] + list(df_lich_su_temp['nha_phan_phoi'].dropna().unique())
-            sel_npp = st.selectbox("Lọc theo Nhà Phân Phối:", list_npp)
-        with c_filter2:
-            sort_type = st.radio("Sắp xếp theo ngày:", ["Mới nhất trước", "Cũ nhất trước"], horizontal=True)
-            
-        if sel_npp != "Tất cả":
-            df_show = df_lich_su_temp[df_lich_su_temp['nha_phan_phoi'] == sel_npp]
-        else:
-            df_show = df_lich_su_temp.copy()
-            
-        ascending = False if sort_type == "Mới nhất trước" else True
-        df_show = df_show.sort_values(by=['ngay_dt', 'id'], ascending=[ascending, ascending])
-            
-        grouped_hd = df_show.groupby(['nha_phan_phoi', 'ngay_nhap_hang'], sort=False)
+        df_hd_grouped = df_lich_su.groupby(["so_hd", "ten_ncc", "ngay_hd"], sort=False).size().reset_index(name="Tong_Mat_Hang")
         
-        for (npp_item, ngay_item), group in grouped_hd:
-            tong_tien_hd = group['tong_tien'].sum() if 'tong_tien' in group.columns else 0
-            so_luong_mon = len(group)
+        if sap_xep == "Mới nhất trước":
+            df_hd_grouped = df_hd_grouped.iloc[::-1].reset_index(drop=True)
             
-            col_exp, col_btn = st.columns([6, 1])
-            with col_exp:
-                with st.expander(f"📄 NPP: **{npp_item}** | Ngày: **{ngay_item}** | Tổng: **{tong_tien_hd:,.0f} đ** ({so_luong_mon} món)"):
-                    cols_to_show = [c for c in ['ten_sp_npp', 'quy_cach', 'so_luong_thung', 'don_gia_thung', 'don_gia_le', 'tong_tien'] if c in group.columns]
-                    st.dataframe(group[cols_to_show], use_container_width=True)
-            with col_btn:
-                if st.button("🗑️ Xóa", key=f"del_{npp_item}_{ngay_item}"):
-                    with engine.begin() as conn:
-                        conn.execute(text("DELETE FROM lich_su WHERE nha_phan_phoi = :n AND ngay_nhap_hang = :d"), {"n": npp_item, "d": ngay_item})
-                    clear_app_cache()
-                    st.success("Đã xóa hóa đơn!")
-                    st.rerun()
+        if ncc_selected != "Tất cả NPP":
+            df_hd_grouped = df_hd_grouped[df_hd_grouped["ten_ncc"] == ncc_selected]
+            
+        st.write("---")
+        
+        count_hd = 0
+        for idx, row in df_hd_grouped.iterrows():
+            so_hd_cur = row['so_hd']
+            ncc_cur = row['ten_ncc']
+            ngay_cur = format_date_str(row['ngay_hd'])
+            
+            mask_hd = (df_lich_su["so_hd"] == so_hd_cur) & (df_lich_su["ten_ncc"] == ncc_cur)
+            df_hd_sub = df_lich_su[mask_hd].copy()
+            
+            if tu_khoa.strip() != "":
+                kw = tu_khoa.lower().strip()
+                in_so_hd = kw in str(so_hd_cur).lower()
+                in_ncc = kw in str(ncc_cur).lower()
+                in_sp = df_hd_sub["ten_phu_npp"].astype(str).str.lower().str.contains(kw).any() or df_hd_sub["ten_sp_chuan"].astype(str).str.lower().str.contains(kw).any()
+                if not (in_so_hd or in_ncc or in_sp):
+                    continue
+            
+            count_hd += 1
+            with st.expander(f"📄 HD: {so_hd_cur} | NCC: {ncc_cur} ({ngay_cur})"):
+                st.write(f"**Số mặt hàng:** {row['Tong_Mat_Hang']} món")
+                
+                list_chuech_lech = []
+                for _, r_item in df_hd_sub.iterrows():
+                    sp_c = r_item["ten_sp_chuan"]
+                    gia_c = r_item["gia_nhap_le"]
+                    idx_c = r_item.name
+                    
+                    df_truoc = df_lich_su[(df_lich_su["ten_sp_chuan"].str.lower() == str(sp_c).lower()) & (df_lich_su.index < idx_c)]
+                    if not df_truoc.empty:
+                        gia_truoc = float(df_truoc.iloc[-1]["gia_nhap_le"])
+                        diff = gia_c - gia_truoc
+                    else:
+                        diff = 0.0
+                    list_chuech_lech.append(diff)
+                
+                df_hd_sub["Biến Động Giá"] = list_chuech_lech
+                
+                df_view = pd.DataFrame()
+                df_view["Tên Hàng NPP"] = df_hd_sub["ten_phu_npp"]
+                df_view["Tên Chuẩn"] = df_hd_sub["ten_sp_chuan"]
+                df_view["Quy Cách"] = df_hd_sub["quy_cach"].astype(int)
+                df_view["Số Lượng"] = df_hd_sub["so_luong"].astype(int)
+                df_view["Giá Thùng"] = df_hd_sub["don_gia_thung"].apply(format_money)
+                df_view["Giá Nhập Lẻ"] = df_hd_sub["gia_nhap_le"].apply(format_money)
+                df_view["Tăng/Giảm (Tiền)"] = df_hd_sub["Biến Động Giá"].apply(lambda x: f"+{format_money(x)}" if x > 0 else (format_money(x) if x < 0 else "0"))
+                
+                def style_row(r):
+                    val_str = str(r["Tăng/Giảm (Tiền)"])
+                    if val_str.startswith("+"):
+                        return ['background-color: #ffcccc; color: #990000; font-weight: bold'] * len(r)
+                    elif val_str.startswith("-"):
+                        return ['background-color: #d4edda; color: #155724; font-weight: bold'] * len(r)
+                    return [''] * len(r)
+                
+                st.dataframe(df_view.style.apply(style_row, axis=1), use_container_width=True)
+                
+                c_btn1, c_btn2 = st.columns(2)
+                
+                with c_btn1:
+                    with st.popover("✏️ Sửa chi tiết HD"):
+                        st.write("Chỉnh sửa Tên chuẩn / Quy cách:")
+                        with st.form(f"form_edit_{idx}"):
+                            edited_items = []
+                            ax_items = []
+                            for sub_idx, sub_row in df_hd_sub.iterrows():
+                                item_id = int(sub_row["id"])
+                                st.caption(f"📌 **{sub_row['ten_phu_npp']}**")
+                                new_qc = st.number_input("Quy cách:", value=float(sub_row["quy_cach"]), min_value=1.0, key=f"qc_{sub_idx}")
+                                
+                                cur_tc = str(sub_row["ten_sp_chuan"])
+                                opts = ["-- Dùng tên cũ: " + cur_tc] + danh_sach_ten_chuandaco + ["➕ Gõ tên mới..."]
+                                chon_tc = st.selectbox(f"Chọn tên chuẩn gợi ý:", options=opts, key=f"sb_edit_{sub_idx}")
+                                
+                                if chon_tc == "➕ Gõ tên mới...":
+                                    final_tc = st.text_input("Nhập tên mới:", value="", key=f"inp_edit_{sub_idx}")
+                                elif chon_tc.startswith("-- Dùng tên cũ:"):
+                                    final_tc = cur_tc
+                                else:
+                                    final_tc = chon_tc
+                                    
+                                tc_clean = clean_name(final_tc)
+                                edited_items.append({
+                                    "id": item_id, 
+                                    "quy_cach": new_qc, 
+                                    "ten_sp_chuan": tc_clean, 
+                                    "gia_nhap_le": sub_row["don_gia_thung"] / new_qc
+                                })
+                                ax_items.append({
+                                    "ten_phu": clean_name(sub_row["ten_phu_npp"]), 
+                                    "ten_chuan": tc_clean
+                                })
+                                st.write("---")
+                            
+                            btn_save_edit = st.form_submit_button("💾 Cập Nhật")
+                            if btn_save_edit:
+                                with engine.begin() as conn:
+                                    for item in edited_items:
+                                        conn.execute(text('''
+                                            UPDATE lich_su 
+                                            SET quy_cach = :quy_cach, ten_sp_chuan = :ten_sp_chuan, gia_nhap_le = :gia_nhap_le
+                                            WHERE id = :id
+                                        '''), item)
+                                    
+                                    conn.execute(text('''
+                                        INSERT INTO anh_xa (ten_phu, ten_chuan)
+                                        VALUES (:ten_phu, :ten_chuan)
+                                        ON CONFLICT (ten_phu) DO UPDATE SET ten_chuan = EXCLUDED.ten_chuan
+                                    '''), ax_items)
+                                
+                                st.cache_data.clear()
+                                st.success("✅ Đã cập nhật xong!")
+                                st.rerun()
+
+                with c_btn2:
+                    with st.popover("🗑 Xóa Hóa Đơn"):
+                        st.warning(f"Bạn có chắc muốn XÓA hẳn HD **{so_hd_cur}**?")
+                        if st.button("🔴 Xác nhận Xóa", key=f"btn_del_hd_{idx}"):
+                            with engine.begin() as conn:
+                                conn.execute(text("DELETE FROM lich_su WHERE so_hd = :so_hd AND ten_ncc = :ten_ncc"), {"so_hd": so_hd_cur, "ten_ncc": ncc_cur})
+                            st.cache_data.clear()
+                            st.success(f"🗑 Đã xóa toàn bộ hóa đơn {so_hd_cur}!")
+                            st.rerun()
+
+        if count_hd == 0:
+            st.warning("Không tìm thấy Hóa đơn nào phù hợp!")
     else:
-        st.info("Chưa có dữ liệu hóa đơn nào trong hệ thống.")
+        st.info("Chưa có hóa đơn nào được lưu.")
 
-# =========================================================
-# TAB 3: QUẢN LÝ TÊN CHUẨN & ÁNH XẠ
-# =========================================================
+# ---------------------------------------------------------
+# TAB 3: QUẢN LÝ TÊN CHUẨN
+# ---------------------------------------------------------
 with tab3:
-    st.subheader("🏷️ Quản Lý Tên Chuẩn & Bảng Ánh Xạ NPP")
+    st.subheader("🛠 Quản Lý Danh Sách Tên Chuẩn")
+    st.caption("Đổi tên sản phẩm hàng loạt hoặc xóa vĩnh viễn tên sai/thừa.")
     
-    col_t1, col_t2 = st.columns(2)
-    with col_t1:
-        st.markdown("##### 1. Thêm Tên Chuẩn Mới")
-        ten_chuan_moi = st.text_input("Nhập tên sản phẩm chuẩn mới:")
-        if st.button("Thêm Tên Chuẩn"):
-            if ten_chuan_moi.strip():
-                with engine.begin() as conn:
-                    conn.execute(text("INSERT INTO ten_chuan (ten_chuan) VALUES (:t) ON CONFLICT DO NOTHING"), {"t": ten_chuan_moi.strip()})
-                clear_app_cache()
-                st.success(f"Đã thêm: {ten_chuan_moi}")
-                st.rerun()
-                
-    with col_t2:
-        st.markdown("##### 2. Khớp Tên NPP với Tên Chuẩn")
-        if not df_lich_su.empty and 'ten_sp_npp' in df_lich_su.columns:
-            ds_ten_npp_chua_ax = list(df_lich_su['ten_sp_npp'].unique())
-            ten_npp_selected = st.selectbox("Chọn tên sản phẩm NPP:", ds_ten_npp_chua_ax)
-            
-            ds_chuan = list(df_chuan['ten_chuan'].unique()) if not df_chuan.empty and 'ten_chuan' in df_chuan.columns else []
-            ten_chuan_selected = st.selectbox("Chọn Tên Chuẩn tương ứng:", ds_chuan)
-            
-            if st.button("Lưu Ánh Xạ"):
-                if ten_npp_selected and ten_chuan_selected:
+    if danh_sach_ten_chuandaco:
+        sp_chon_ql = st.selectbox("🎯 Chọn Tên Chuẩn cần Sửa hoặc Xóa:", danh_sach_ten_chuandaco)
+        
+        st.write("---")
+        col_act1, col_act2 = st.columns(2)
+        
+        with col_act1:
+            st.markdown("##### ✏️ Đổi Tên Chuẩn")
+            ten_moi_input = st.text_input("Nhập tên chuẩn mới thay thế:", value=sp_chon_ql)
+            if st.button("💾 Đổi Tên Hàng Loạt"):
+                ten_moi_clean = clean_name(ten_moi_input)
+                if ten_moi_clean and ten_moi_clean != sp_chon_ql:
                     with engine.begin() as conn:
-                        conn.execute(
-                            text("INSERT INTO anh_xa (ten_npp, ten_chuan) VALUES (:n, :c) ON CONFLICT (ten_npp) DO UPDATE SET ten_chuan = :c"),
-                            {"n": ten_npp_selected, "c": ten_chuan_selected}
-                        )
-                        conn.execute(
-                            text("UPDATE lich_su SET ten_sp_chuan = :c WHERE ten_sp_npp = :n"),
-                            {"n": ten_npp_selected, "c": ten_chuan_selected}
-                        )
-                    clear_app_cache()
-                    st.success("Đã lưu ánh xạ thành công!")
+                        conn.execute(text("UPDATE lich_su SET ten_sp_chuan = :ten_moi WHERE ten_sp_chuan = :ten_cu"), {"ten_moi": ten_moi_clean, "ten_cu": sp_chon_ql})
+                        conn.execute(text("UPDATE anh_xa SET ten_chuan = :ten_moi WHERE ten_chuan = :ten_cu"), {"ten_moi": ten_moi_clean, "ten_cu": sp_chon_ql})
+                    st.cache_data.clear()
+                    st.success(f"✅ Đã đổi tên '{sp_chon_ql}' ➔ '{ten_moi_clean}'!")
                     st.rerun()
+        
+        with col_act2:
+            st.markdown("##### 🗑 Xóa Tên Chuẩn Vĩnh Viễn")
+            st.warning(f"Xóa `{sp_chon_ql}` khỏi gợi ý & đổi các mặt hàng tên này về tên góc NPP.")
+            if st.button("❌ Xác Nhận Xóa Tên Này"):
+                with engine.begin() as conn:
+                    conn.execute(text("DELETE FROM anh_xa WHERE ten_chuan = :ten_cu"), {"ten_cu": sp_chon_ql})
+                    conn.execute(text("UPDATE lich_su SET ten_sp_chuan = ten_phu_npp WHERE ten_sp_chuan = :ten_cu"), {"ten_cu": sp_chon_ql})
+                st.cache_data.clear()
+                st.success(f"🗑 Đã xóa hoàn toàn tên '{sp_chon_ql}'!")
+                st.rerun()
+    else:
+        st.info("Chưa có danh sách Tên chuẩn nào.")
 
-    st.markdown("---")
-    st.markdown("##### Danh Sách Ánh Xạ Hiện Tại")
-    if not df_anh_xa.empty:
-        st.dataframe(df_anh_xa, use_container_width=True)
-
-# =========================================================
-# TAB 4: SO SÁNH GIÁ VỚI HÓA ĐƠN TRƯỚC ĐÓ
-# =========================================================
+# ---------------------------------------------------------
+# TAB 4: LỊCH SỬ CHI TIẾT
+# ---------------------------------------------------------
 with tab4:
-    st.subheader("🔍 Chi Tiết & So Sánh Giá Hóa Đơn")
-    
-    if not df_lich_su.empty and 'nha_phan_phoi' in df_lich_su.columns and 'ngay_nhap_hang' in df_lich_su.columns:
-        df_lich_su_t4 = df_lich_su.copy()
-        df_hd_list = df_lich_su_t4[['nha_phan_phoi', 'ngay_nhap_hang', 'ngay_dt']].drop_duplicates().sort_values(by='ngay_dt', ascending=False)
-        
-        hd_options = [f"NPP: {row['nha_phan_phoi']} | Ngày: {row['ngay_nhap_hang']}" for _, row in df_hd_list.iterrows()]
-        selected_hd = st.selectbox("Chọn hóa đơn cần xem chi tiết so sánh:", hd_options)
-        
-        if selected_hd:
-            parts = selected_hd.split(" | ")
-            curr_npp = parts[0].replace("NPP: ", "").strip()
-            curr_ngay = parts[1].replace("Ngày: ", "").strip()
-            
-            curr_hd_df = df_lich_su_t4[(df_lich_su_t4['nha_phan_phoi'] == curr_npp) & (df_lich_su_t4['ngay_nhap_hang'] == curr_ngay)]
-            curr_dt = curr_hd_df['ngay_dt'].iloc[0] if not curr_hd_df.empty else None
-            
-            prev_hd_all = df_lich_su_t4[df_lich_su_t4['ngay_dt'] < curr_dt] if curr_dt is not None else pd.DataFrame()
-            
-            result_rows = []
-            for _, row in curr_hd_df.iterrows():
-                ten_npp = row.get('ten_sp_npp', '')
-                ten_chuan = row.get('ten_sp_chuan', ten_npp)
-                gia_thung_curr = row.get('don_gia_thung', 0)
-                
-                prev_price_row = prev_hd_all[prev_hd_all['ten_sp_chuan'] == ten_chuan].sort_values(by='ngay_dt', ascending=False) if not prev_hd_all.empty and 'ten_sp_chuan' in prev_hd_all.columns else pd.DataFrame()
-                
-                if not prev_price_row.empty:
-                    gia_thung_prev = prev_price_row.iloc[0].get('don_gia_thung', 0)
-                    ngay_prev = prev_price_row.iloc[0].get('ngay_nhap_hang', '')
-                    diff_thung = gia_thung_curr - gia_thung_prev
-                    
-                    if diff_thung > 0: trang_thai = f"🔴 TĂNG {diff_thung:,.0f}đ"
-                    elif diff_thung < 0: trang_thai = f"🟢 GIẢM {abs(diff_thung):,.0f}đ"
-                    else: trang_thai = "⚪ Không đổi"
-                else:
-                    gia_thung_prev = 0
-                    ngay_prev = "Chưa có"
-                    trang_thai = "🆕 Hàng mới"
-                    
-                result_rows.append({
-                    "Tên Hàng Hóa": ten_npp,
-                    "Số Lượng": row.get('so_luong_thung', 0),
-                    "Đơn Giá Thùng Hiện Tại": gia_thung_curr,
-                    "Đơn Giá Lẻ Hiện Tại": row.get('don_gia_le', 0),
-                    "Đơn Giá Thùng Trước": gia_thung_prev,
-                    "Ngày Nhập Trước": ngay_prev,
-                    "Tăng/Giảm": trang_thai,
-                    "Thành Tiền": row.get('tong_tien', 0)
-                })
-                
-            st.dataframe(pd.DataFrame(result_rows), use_container_width=True)
+    st.subheader("📜 Toàn bộ lịch sử nhập hàng")
+    if not df_lich_su.empty:
+        df_all = df_lich_su.copy()
+        df_all["ngay_hd"] = df_all["ngay_hd"].apply(format_date_str)
+        df_all["don_gia_thung"] = df_all["don_gia_thung"].apply(format_money)
+        df_all["gia_nhap_le"] = df_all["gia_nhap_le"].apply(format_money)
+        st.dataframe(df_all, use_container_width=True)
+    else:
+        st.info("Lịch sử trống.")
 
-# =========================================================
-# TAB 5: BÁO CÁO & BIỂU ĐỒ
-# =========================================================
+# ---------------------------------------------------------
+# TAB 5: BIỂU ĐỒ & THỐNG KÊ
+# ---------------------------------------------------------
 with tab5:
     st.subheader("📊 Báo Cáo & Biểu Đồ Nhập Hàng")
     
-    if not df_lich_su.empty and 'ngay_dt' in df_lich_su.columns:
-        df_bc = df_lich_su.copy()
-        time_option = st.selectbox("Chọn khoảng thời gian báo cáo:", ["Tháng này", "Tất cả thời gian"])
+    if not df_lich_su.empty:
+        df_stat = df_lich_su.copy()
+        df_stat["Tong_Tien_Dong"] = df_stat["so_luong"] * df_stat["don_gia_thung"]
+        df_stat["Date_Obj"] = pd.to_datetime(df_stat["ngay_hd"], dayfirst=True, errors='coerce')
+        df_stat = df_stat.dropna(subset=["Date_Obj"])
         
-        now = datetime.now()
-        if time_option == "Tháng này":
-            df_bc_filtered = df_bc[(df_bc['ngay_dt'].dt.month == now.month) & (df_bc['ngay_dt'].dt.year == now.year)]
-        else:
-            df_bc_filtered = df_bc.copy()
+        if not df_stat.empty:
+            now = datetime.now()
             
-        if not df_bc_filtered.empty and 'tong_tien' in df_bc_filtered.columns:
-            tong_so_hd = df_bc_filtered.groupby(['nha_phan_phoi', 'ngay_nhap_hang']).ngroups if 'nha_phan_phoi' in df_bc_filtered.columns else len(df_bc_filtered)
-            tong_tien_nhap = df_bc_filtered['tong_tien'].sum()
-            tong_mat_hang = len(df_bc_filtered)
-            
-            c1, c2, c3 = st.columns(3)
-            c1.metric("💰 Tổng tiền nhập", f"{tong_tien_nhap:,.0f} đ")
-            c2.metric("📄 Tổng số HD", f"{tong_so_hd} hóa đơn")
-            c3.metric("📦 Tổng mặt hàng", f"{tong_mat_hang} món")
-            
-            st.markdown("---")
-            st.markdown("##### 📈 Biểu Đồ Chi Phí Nhập Hàng")
-            
-            df_chart = df_bc_filtered.groupby(['ngay_nhap_hang', 'ngay_dt'], as_index=False)['tong_tien'].sum().sort_values(by='ngay_dt')
-            fig = px.bar(
-                df_chart, 
-                x='ngay_nhap_hang', 
-                y='tong_tien', 
-                text_auto=',.0f',
-                labels={'ngay_nhap_hang': 'Ngày Nhập', 'tong_tien': 'Số Tiền (VNĐ)'},
-                title="Tổng Chi Phí Nhập Hàng Theo Ngày"
+            luat_chon = st.selectbox(
+                "📅 Chọn khoảng thời gian báo cáo:",
+                ["Tháng này", "Tháng trước", "Năm nay", "Năm trước", "Tùy chỉnh ngày"]
             )
-            fig.update_traces(textposition='outside')
-            st.plotly_chart(fig, use_container_width=True)
+            
+            group_mode = "day"
+            
+            if luat_chon == "Tháng này":
+                start_d = datetime(now.year, now.month, 1)
+                end_d = now
+                group_mode = "day"
+            elif luat_chon == "Tháng trước":
+                first_this_month = datetime(now.year, now.month, 1)
+                end_d = first_this_month - pd.Timedelta(days=1)
+                start_d = datetime(end_d.year, end_d.month, 1)
+                group_mode = "day"
+            elif luat_chon == "Năm nay":
+                start_d = datetime(now.year, 1, 1)
+                end_d = now
+                group_mode = "month"
+            elif luat_chon == "Năm trước":
+                start_d = datetime(now.year - 1, 1, 1)
+                end_d = datetime(now.year - 1, 12, 31)
+                group_mode = "month"
+            else:
+                col_d1, col_d2 = st.columns(2)
+                with col_d1:
+                    start_input = st.date_input("Từ ngày:", datetime(now.year, now.month, 1))
+                with col_d2:
+                    end_input = st.date_input("Đến ngày:", now)
+                start_d = datetime.combine(start_input, datetime.min.time())
+                end_d = datetime.combine(end_input, datetime.max.time())
+                
+                days_diff = (end_d - start_d).days
+                if days_diff <= 31:
+                    group_mode = "day"
+                else:
+                    group_mode = "month"
+
+            mask_time = (df_stat["Date_Obj"] >= start_d) & (df_stat["Date_Obj"] <= end_d)
+            df_filtered = df_stat[mask_time].copy()
+
+            st.write("---")
+
+            if not df_filtered.empty:
+                tong_chi_phi = df_filtered["Tong_Tien_Dong"].sum()
+                tong_hd = df_filtered["so_hd"].nunique()
+                tong_mon = len(df_filtered)
+
+                col_m1, col_m2, col_m3 = st.columns(3)
+                col_m1.metric("💰 Tổng tiền nhập", f"{format_money(tong_chi_phi)} đ")
+                col_m2.metric("📄 Tổng số HD", f"{tong_hd} hóa đơn")
+                col_m3.metric("📦 Tổng mặt hàng", f"{tong_mon} món")
+
+                st.write("---")
+
+                if group_mode == "day":
+                    st.markdown("##### 📈 Biểu Đồ Nhập Hàng Theo Từng Ngày")
+                    df_filtered["Time_Key"] = df_filtered["Date_Obj"].dt.strftime("%d/%m/%Y")
+                    df_by_time = df_filtered.groupby(["Time_Key", "Date_Obj"])["Tong_Tien_Dong"].sum().reset_index()
+                    df_by_time = df_by_time.sort_values(by="Date_Obj")
+                    x_label = "Ngày nhập"
+                else:
+                    st.markdown("##### 📈 Biểu Đồ Nhập Hàng Theo Từng Tháng")
+                    df_filtered["Time_Key"] = df_filtered["Date_Obj"].dt.strftime("Tháng %m/%Y")
+                    df_filtered["YearMonth"] = df_filtered["Date_Obj"].dt.to_period('M')
+                    df_by_time = df_filtered.groupby(["Time_Key", "YearMonth"])["Tong_Tien_Dong"].sum().reset_index()
+                    df_by_time = df_by_time.sort_values(by="YearMonth")
+                    x_label = "Tháng nhập"
+                
+                df_by_time.columns = [x_label, "Sort_Key", "Tổng Tiền (Đồng)"]
+                
+                fig_time = px.bar(
+                    df_by_time, 
+                    x=x_label, 
+                    y="Tổng Tiền (Đồng)",
+                    text_auto=True,
+                    color_discrete_sequence=['#1f77b4']
+                )
+                fig_time.update_traces(texttemplate='%{y:,.0f} đ', textposition='outside')
+                fig_time.update_layout(xaxis_title=x_label, yaxis_title="Số tiền (VNĐ)", height=420)
+                st.plotly_chart(fig_time, use_container_width=True)
+
+                st.markdown("##### 🏢 Tỷ Trọng Nhập Hàng Theo Nhà Cung Cấp (NPP)")
+                df_by_ncc = df_filtered.groupby("ten_ncc")["Tong_Tien_Dong"].sum().reset_index().sort_values(by="Tong_Tien_Dong", ascending=False)
+                df_by_ncc.columns = ["Nhà Cung Cấp", "Tổng Tiền (Đồng)"]
+
+                fig_ncc = px.bar(
+                    df_by_ncc, 
+                    x="Nhà Cung Cấp", 
+                    y="Tổng Tiền (Đồng)",
+                    color="Nhà Cung Cấp",
+                    text_auto=True
+                )
+                fig_ncc.update_traces(texttemplate='%{y:,.0f} đ', textposition='outside')
+                fig_ncc.update_layout(xaxis_title="Nhà Cung Cấp", yaxis_title="Số tiền (VNĐ)", height=420, showlegend=False)
+                st.plotly_chart(fig_ncc, use_container_width=True)
+
+            else:
+                st.warning("⚠️ Không có dữ liệu hóa đơn nào trong khoảng thời gian này!")
         else:
-            st.info("Không có dữ liệu trong thời gian chọn.")
+            st.info("Chưa có ngày hợp lệ trong dữ liệu.")
     else:
-        st.info("Chưa có dữ liệu để lập báo cáo.")
+        st.info("Chưa có dữ liệu lịch sử để thống kê biểu đồ.")
