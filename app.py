@@ -4,6 +4,9 @@ from sqlalchemy import create_engine, text
 import plotly.express as px
 from datetime import datetime
 
+# ---------------------------------------------------------
+# 1. CẤU HÌNH TRANG VÀ KẾT NỐI DATABASE
+# ---------------------------------------------------------
 st.set_page_config(page_title="App Nhập Hàng", layout="wide", initial_sidebar_state="expanded")
 
 @st.cache_resource
@@ -19,7 +22,6 @@ def get_database_engine():
 
 engine = get_database_engine()
 
-# Hàm tự động tìm cột linh hoạt
 def find_col(df, possible_names):
     for col in df.columns:
         if str(col).strip().lower() in [p.lower() for p in possible_names]:
@@ -44,7 +46,6 @@ def load_data_from_db():
         except Exception:
             df_chuan = pd.DataFrame()
         
-    # Chuẩn hóa linh hoạt các tên cột của lich_su
     if not df_lich_su.empty:
         col_npp = find_col(df_lich_su, ['nha_phan_phoi', 'npp', 'nhaphanphoi'])
         col_ngay = find_col(df_lich_su, ['ngay_nhap_hang', 'ngay_nhap', 'ngay'])
@@ -56,7 +57,6 @@ def load_data_from_db():
         col_gia_le = find_col(df_lich_su, ['don_gia_le', 'gia_le'])
         col_tong = find_col(df_lich_su, ['tong_tien', 'thanhtien', 'thanh_tien'])
 
-        # Gán lại chuẩn hóa
         if col_npp: df_lich_su['nha_phan_phoi'] = df_lich_su[col_npp]
         if col_ngay: df_lich_su['ngay_nhap_hang'] = df_lich_su[col_ngay]
         if col_sp_npp: df_lich_su['ten_sp_npp'] = df_lich_su[col_sp_npp]
@@ -92,7 +92,9 @@ with st.spinner("Đang tải dữ liệu từ máy chủ..."):
 
 st.title("📦 Phần Mềm Quản Lý Nhập Hàng & Giá Cả")
 
-# Tạo các Tab
+# ---------------------------------------------------------
+# 2. KHỞI TẠO CÁC TAB
+# ---------------------------------------------------------
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📥 Nhập Hóa Đơn", 
     "📋 Danh Sách Hóa Đơn", 
@@ -109,17 +111,17 @@ with tab1:
     
     col_input1, col_input2 = st.columns(2)
     with col_input1:
-        nha_phan_phoi = st.text_input("Tên Nhà Phân Phối (NPP):", placeholder="Nhập tên NPP...")
-    with col_input2:
         ngay_nhap_selected = st.date_input("Ngày nhập hóa đơn:", value=datetime.now())
         ngay_nhap_str = ngay_nhap_selected.strftime("%d/%m/%Y")
+    with col_input2:
+        nha_phan_phoi = st.text_input("Tên Nhà Phân Phối (NPP - Tùy chọn):", placeholder="Nhập tên NPP (nếu có)...")
         
     uploaded_file = st.file_uploader("Tải lên file hóa đơn Excel (.xlsx, .xls)", type=["xlsx", "xls"])
     
-    if uploaded_file and nha_phan_phoi.strip():
+    if uploaded_file:
         try:
             df_upload = pd.read_excel(uploaded_file)
-            st.success("Tải file thành công! Vui lòng kiểm tra lại danh sách sản phẩm bên dưới:")
+            st.success("Tải file thành công! Kiểm tra danh sách mặt hàng bên dưới:")
             st.dataframe(df_upload.head(10), use_container_width=True)
             
             if st.button("💾 Lưu Hóa Đơn Vào Hệ Thống", type="primary"):
@@ -140,8 +142,10 @@ with tab1:
                         tong_tien = so_luong_thung * don_gia_thung
                         ten_sp_chuan = anh_xa_dict.get(ten_sp_npp, ten_sp_npp)
                         
+                        npp_final = nha_phan_phoi.strip() if nha_phan_phoi.strip() else str(row.get('NPP', row.get('Nhà phân phối', 'NPP Chung'))).strip()
+
                         rows_to_insert.append({
-                            "nha_phan_phoi": nha_phan_phoi.strip(),
+                            "nha_phan_phoi": npp_final,
                             "so_hoa_don": "",
                             "ngay_nhap_hang": ngay_nhap_str,
                             "ten_sp_npp": ten_sp_npp,
@@ -158,14 +162,12 @@ with tab1:
                         df_insert.to_sql("lich_su", engine, if_exists="append", index=False, method="multi", chunksize=1000)
                         clear_app_cache()
                         st.balloons()
-                        st.success(f"Đã lưu thành công hóa đơn của {nha_phan_phoi} ngày {ngay_nhap_str}!")
+                        st.success(f"Đã lưu thành công hóa đơn ngày {ngay_nhap_str}!")
                         st.rerun()
                     else:
                         st.warning("Không tìm thấy dòng dữ liệu hợp lệ trong file Excel.")
         except Exception as e:
             st.error(f"Lỗi xử lý file Excel: {e}")
-    elif uploaded_file and not nha_phan_phoi.strip():
-        st.info("Vui lòng nhập Tên Nhà Phân Phối trước khi lưu.")
 
 # =========================================================
 # TAB 2: DANH SÁCH HÓA ĐƠN
