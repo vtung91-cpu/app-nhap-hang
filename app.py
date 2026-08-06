@@ -22,65 +22,52 @@ def get_database_engine():
 
 engine = get_database_engine()
 
-def init_db():
-    with engine.begin() as conn:
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS ten_chuan (
-                id SERIAL PRIMARY KEY,
-                ten_chuan TEXT UNIQUE NOT NULL
-            );
-        """))
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS anh_xa (
-                id SERIAL PRIMARY KEY,
-                ten_npp TEXT UNIQUE NOT NULL,
-                ten_chuan TEXT NOT NULL
-            );
-        """))
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS lich_su (
-                id SERIAL PRIMARY KEY,
-                nha_phan_phoi TEXT,
-                so_hoa_don TEXT,
-                ngay_nhap_hang TEXT,
-                ten_sp_npp TEXT,
-                ten_sp_chuan TEXT,
-                quy_cach NUMERIC,
-                so_luong_thung NUMERIC,
-                don_gia_thung NUMERIC,
-                don_gia_le NUMERIC,
-                tong_tien NUMERIC
-            );
-        """))
-
-init_db()
-
+# Đọc dữ liệu an toàn từ Database (Giữ nguyên toàn bộ dữ liệu cũ)
 @st.cache_data(ttl=600, show_spinner=False)
 def load_data_from_db():
     with engine.connect() as conn:
-        df_lich_su = pd.read_sql(text("SELECT * FROM lich_su ORDER BY id DESC"), conn)
-        df_anh_xa = pd.read_sql(text("SELECT * FROM anh_xa"), conn)
-        df_chuan = pd.read_sql(text("SELECT * FROM ten_chuan"), conn)
-        
-    # Chuẩn hóa tên cột về chữ thường để tránh lỗi KeyError
-    df_lich_su.columns = [c.lower() for c in df_lich_su.columns]
-    df_anh_xa.columns = [c.lower() for c in df_anh_xa.columns]
-    df_chuan.columns = [c.lower() for c in df_chuan.columns]
+        try:
+            df_lich_su = pd.read_sql(text("SELECT * FROM lich_su ORDER BY id DESC"), conn)
+        except Exception:
+            df_lich_su = pd.DataFrame()
 
-    if not df_lich_su.empty and 'ngay_nhap_hang' in df_lich_su.columns:
-        df_lich_su['ngay_dt'] = pd.to_datetime(df_lich_su['ngay_nhap_hang'], format='%d/%m/%Y', errors='coerce')
-    else:
-        df_lich_su['ngay_dt'] = pd.Series(dtype='datetime64[ns]')
+        try:
+            df_anh_xa = pd.read_sql(text("SELECT * FROM anh_xa"), conn)
+        except Exception:
+            df_anh_xa = pd.DataFrame()
+
+        try:
+            df_chuan = pd.read_sql(text("SELECT * FROM ten_chuan"), conn)
+        except Exception:
+            df_chuan = pd.DataFrame()
+        
+    # Chuyển toàn bộ tên cột về chữ thường để tránh lỗi lệch tên cột giữa DB và Pandas
+    if not df_lich_su.empty:
+        df_lich_su.columns = [str(c).lower() for c in df_lich_su.columns]
+        
+        # Tìm cột chứa thông tin ngày nhập hàng
+        col_date = next((c for c in ['ngay_nhap_hang', 'ngay_nhap', 'ngay'] if c in df_lich_su.columns), None)
+        if col_date:
+            df_lich_su['ngay_nhap_hang'] = df_lich_su[col_date]
+            df_lich_su['ngay_dt'] = pd.to_datetime(df_lich_su['ngay_nhap_hang'], format='%d/%m/%Y', errors='coerce')
+        else:
+            df_lich_su['ngay_dt'] = pd.NaT
+
+    if not df_anh_xa.empty:
+        df_anh_xa.columns = [str(c).lower() for c in df_anh_xa.columns]
+
+    if not df_chuan.empty:
+        df_chuan.columns = [str(c).lower() for c in df_chuan.columns]
         
     return df_lich_su, df_anh_xa, df_chuan
 
 def clear_app_cache():
     st.cache_data.clear()
 
-with st.spinner("Đang tải dữ liệu..."):
+with st.spinner("Đang tải dữ liệu từ máy chủ..."):
     df_lich_su, df_anh_xa, df_chuan = load_data_from_db()
 
-st.title("📦 Phầm Mềm Quản Lý Nhập Hàng & Giá Cả")
+st.title("📦 Phần Mềm Quản Lý Nhập Hàng & Giá Cả")
 
 # ---------------------------------------------------------
 # 2. KHỞI TẠO CÁC TAB
@@ -94,7 +81,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 # =========================================================
-# TAB 1: NHẬP HÓA ĐƠN (CHỈ LẤY NPP & NGÀY NHẬP TAY)
+# TAB 1: NHẬP HÓA ĐƠN
 # =========================================================
 with tab1:
     st.subheader("📥 Nhập Hóa Đơn Mới Từ Excel")
@@ -112,12 +99,11 @@ with tab1:
         try:
             df_upload = pd.read_excel(uploaded_file)
             st.success("Tải file thành công! Vui lòng kiểm tra lại danh sách sản phẩm bên dưới:")
-            
             st.dataframe(df_upload.head(10), use_container_width=True)
             
             if st.button("💾 Lưu Hóa Đơn Vào Hệ Thống", type="primary"):
                 with st.spinner("Đang xử lý và lưu dữ liệu..."):
-                    anh_xa_dict = dict(zip(df_anh_xa['ten_npp'], df_anh_xa['ten_chuan'])) if not df_anh_xa.empty else {}
+                    anh_xa_dict = dict(zip(df_anh_xa['ten_npp'], df_anh_xa['ten_chuan'])) if not df_anh_xa.empty and 'ten_npp' in df_anh_xa.columns else {}
                     
                     rows_to_insert = []
                     for idx, row in df_upload.iterrows():
@@ -131,7 +117,6 @@ with tab1:
                             
                         don_gia_le = don_gia_thung / quy_cach if quy_cach > 0 else don_gia_thung
                         tong_tien = so_luong_thung * don_gia_thung
-                        
                         ten_sp_chuan = anh_xa_dict.get(ten_sp_npp, ten_sp_npp)
                         
                         rows_to_insert.append({
@@ -183,30 +168,20 @@ with tab2:
             df_show = df_lich_su_temp.copy()
             
         if sort_type == "Mới nhất trước":
-            df_show = df_show.sort_values(by=['ngay_dt', 'id'], ascending=[False, False])
+            df_show = df_show.sort_values(by=['ngay_dt', 'id'], ascending=[False, False]) if 'id' in df_show.columns else df_show.sort_values(by=['ngay_dt'], ascending=[False])
         else:
-            df_show = df_show.sort_values(by=['ngay_dt', 'id'], ascending=[True, True])
+            df_show = df_show.sort_values(by=['ngay_dt', 'id'], ascending=[True, True]) if 'id' in df_show.columns else df_show.sort_values(by=['ngay_dt'], ascending=[True])
             
         grouped_hd = df_show.groupby(['nha_phan_phoi', 'ngay_nhap_hang'], sort=False)
         
         for (npp_item, ngay_item), group in grouped_hd:
-            tong_tien_hd = group['tong_tien'].sum()
+            tong_tien_hd = group['tong_tien'].sum() if 'tong_tien' in group.columns else 0
             so_luong_mon = len(group)
             
             with st.expander(f"📄 NPP: **{npp_item}** | Ngày nhập: **{ngay_item}** | Tổng tiền: **{tong_tien_hd:,.0f} đ** ({so_luong_mon} mặt hàng)"):
-                df_view_hd = group[['ten_sp_npp', 'quy_cach', 'so_luong_thung', 'don_gia_thung', 'don_gia_le', 'tong_tien']].copy()
-                df_view_hd.columns = ['Tên Hàng Hóa (NPP)', 'Quy Cách (Cái/Thùng)', 'Số Lượng Thùng', 'Đơn Giá Thùng (đ)', 'Đơn Giá Lẻ (đ)', 'Thành Tiền (đ)']
-                
-                st.dataframe(
-                    df_view_hd.style.format({
-                        'Quy Cách (Cái/Thùng)': '{:,.0f}',
-                        'Số Lượng Thùng': '{:,.1f}',
-                        'Đơn Giá Thùng (đ)': '{:,.0f}',
-                        'Đơn Giá Lẻ (đ)': '{:,.0f}',
-                        'Thành Tiền (đ)': '{:,.0f}'
-                    }), 
-                    use_container_width=True
-                )
+                cols_to_show = [c for c in ['ten_sp_npp', 'quy_cach', 'so_luong_thung', 'don_gia_thung', 'don_gia_le', 'tong_tien'] if c in group.columns]
+                df_view_hd = group[cols_to_show].copy()
+                st.dataframe(df_view_hd, use_container_width=True)
     else:
         st.info("Chưa có dữ liệu hóa đơn nào trong hệ thống.")
 
@@ -263,9 +238,8 @@ with tab3:
 with tab4:
     st.subheader("🔍 Chi Tiết & So Sánh Giá Hóa Đơn Gần Nhất")
     
-    if not df_lich_su.empty and 'nha_phan_phoi' in df_lich_su.columns:
+    if not df_lich_su.empty and 'nha_phan_phoi' in df_lich_su.columns and 'ngay_nhap_hang' in df_lich_su.columns:
         df_lich_su_t4 = df_lich_su.copy()
-        
         df_hd_list = df_lich_su_t4[['nha_phan_phoi', 'ngay_nhap_hang', 'ngay_dt']].drop_duplicates().sort_values(by='ngay_dt', ascending=False)
         
         hd_options = [f"NPP: {row['nha_phan_phoi']} | Ngày: {row['ngay_nhap_hang']}" for _, row in df_hd_list.iterrows()]
@@ -286,18 +260,16 @@ with tab4:
             
             result_rows = []
             for _, row in curr_hd_df.iterrows():
-                ten_npp = row['ten_sp_npp']
-                ten_chuan = row['ten_sp_chuan']
-                gia_thung_curr = row['don_gia_thung']
-                gia_le_curr = row['don_gia_le']
+                ten_npp = row.get('ten_sp_npp', '')
+                ten_chuan = row.get('ten_sp_chuan', ten_npp)
+                gia_thung_curr = row.get('don_gia_thung', 0)
+                gia_le_curr = row.get('don_gia_le', 0)
                 
-                prev_price_row = prev_hd_all[prev_hd_all['ten_sp_chuan'] == ten_chuan].sort_values(by='ngay_dt', ascending=False) if not prev_hd_all.empty else pd.DataFrame()
+                prev_price_row = prev_hd_all[prev_hd_all['ten_sp_chuan'] == ten_chuan].sort_values(by='ngay_dt', ascending=False) if not prev_hd_all.empty and 'ten_sp_chuan' in prev_hd_all.columns else pd.DataFrame()
                 
                 if not prev_price_row.empty:
-                    gia_thung_prev = prev_price_row.iloc[0]['don_gia_thung']
-                    gia_le_prev = prev_price_row.iloc[0]['don_gia_le']
-                    ngay_prev = prev_price_row.iloc[0]['ngay_nhap_hang']
-                    
+                    gia_thung_prev = prev_price_row.iloc[0].get('don_gia_thung', 0)
+                    ngay_prev = prev_price_row.iloc[0].get('ngay_nhap_hang', '')
                     diff_thung = gia_thung_curr - gia_thung_prev
                     
                     if diff_thung > 0:
@@ -307,34 +279,23 @@ with tab4:
                     else:
                         trang_thai = "⚪ Không đổi"
                 else:
-                    gia_thung_prev = None
-                    gia_le_prev = None
+                    gia_thung_prev = 0
                     ngay_prev = "Chưa có"
                     trang_thai = "🆕 Hàng mới nhập"
                     
                 result_rows.append({
                     "Tên Hàng Hóa (NPP)": ten_npp,
-                    "Số Lượng": row['so_luong_thung'],
+                    "Số Lượng": row.get('so_luong_thung', 0),
                     "Đơn Giá Thùng Hiện Tại": gia_thung_curr,
                     "Đơn Giá Lẻ Hiện Tại": gia_le_curr,
-                    "Đơn Giá Thùng Trước": gia_thung_prev if gia_thung_prev else 0,
+                    "Đơn Giá Thùng Trước": gia_thung_prev,
                     "Ngày Nhập Trước": ngay_prev,
                     "Tăng/Giảm Giá Thùng": trang_thai,
-                    "Thành Tiền": row['tong_tien']
+                    "Thành Tiền": row.get('tong_tien', 0)
                 })
                 
             df_res = pd.DataFrame(result_rows)
-            
-            st.dataframe(
-                df_res.style.format({
-                    'Số Lượng': '{:,.1f}',
-                    'Đơn Giá Thùng Hiện Tại': '{:,.0f} đ',
-                    'Đơn Giá Lẻ Hiện Tại': '{:,.0f} đ',
-                    'Đơn Giá Thùng Trước': '{:,.0f} đ',
-                    'Thành Tiền': '{:,.0f} đ'
-                }),
-                use_container_width=True
-            )
+            st.dataframe(df_res, use_container_width=True)
 
 # =========================================================
 # TAB 5: BÁO CÁO & BIỂU ĐỒ
@@ -352,8 +313,8 @@ with tab5:
         else:
             df_bc_filtered = df_bc.copy()
             
-        if not df_bc_filtered.empty:
-            tong_so_hd = df_bc_filtered.groupby(['nha_phan_phoi', 'ngay_nhap_hang']).ngroups
+        if not df_bc_filtered.empty and 'tong_tien' in df_bc_filtered.columns:
+            tong_so_hd = df_bc_filtered.groupby(['nha_phan_phoi', 'ngay_nhap_hang']).ngroups if 'nha_phan_phoi' in df_bc_filtered.columns else len(df_bc_filtered)
             tong_tien_nhap = df_bc_filtered['tong_tien'].sum()
             tong_mat_hang = len(df_bc_filtered)
             
@@ -365,19 +326,20 @@ with tab5:
             st.markdown("---")
             st.markdown("##### 📈 Biểu Đồ Nhập Hàng Theo Ngày")
             
-            df_chart = df_bc_filtered.groupby(['ngay_nhap_hang', 'ngay_dt'], as_index=False)['tong_tien'].sum()
-            df_chart = df_chart.sort_values(by='ngay_dt')
-            
-            fig = px.bar(
-                df_chart, 
-                x='ngay_nhap_hang', 
-                y='tong_tien', 
-                text_auto=',.0f',
-                labels={'ngay_nhap_hang': 'Ngày Nhập', 'tong_tien': 'Số Tiền (VNĐ)'},
-                title="Tổng Chi Phí Nhập Hàng Theo Ngày"
-            )
-            fig.update_traces(textposition='outside')
-            st.plotly_chart(fig, use_container_width=True)
+            if 'ngay_nhap_hang' in df_bc_filtered.columns:
+                df_chart = df_bc_filtered.groupby(['ngay_nhap_hang', 'ngay_dt'], as_index=False)['tong_tien'].sum()
+                df_chart = df_chart.sort_values(by='ngay_dt')
+                
+                fig = px.bar(
+                    df_chart, 
+                    x='ngay_nhap_hang', 
+                    y='tong_tien', 
+                    text_auto=',.0f',
+                    labels={'ngay_nhap_hang': 'Ngày Nhập', 'tong_tien': 'Số Tiền (VNĐ)'},
+                    title="Tổng Chi Phí Nhập Hàng Theo Ngày"
+                )
+                fig.update_traces(textposition='outside')
+                st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Không có dữ liệu trong khoảng thời gian đã chọn.")
     else:
