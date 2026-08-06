@@ -5,11 +5,11 @@ import plotly.express as px
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. CẤU HÌNH TRANG VÀ KẾT NỐI DATABASE (TỐI ƯU HIỆU NĂNG)
+# 1. CẤU HÌNH TRANG VÀ KẾT NỐI DATABASE
 # ---------------------------------------------------------
 st.set_page_config(page_title="App Nhập Hàng", layout="wide", initial_sidebar_state="expanded")
 
-# Kết nối Supabase tối ưu pool_size và recycle
+# Kết nối Supabase tối ưu pool
 @st.cache_resource
 def get_database_engine():
     db_url = st.secrets["postgres"]["url"]
@@ -23,14 +23,20 @@ def get_database_engine():
 
 engine = get_database_engine()
 
-# Cache đọc dữ liệu tối ưu: Ép kiểu dữ liệu ngày tháng ngay từ SQL để không tốn CPU xử lý lại
+# Cache đọc dữ liệu an toàn: Chuyển kiểu ngày bằng pandas (tránh lỗi TO_DATE của SQL)
 @st.cache_data(ttl=600, show_spinner=False)
 def load_data_from_db():
     with engine.connect() as conn:
-        # Tải lịch sử và chuẩn hóa ngày sẵn
-        df_lich_su = pd.read_sql("SELECT *, TO_DATE(ngay_nhap_hang, 'DD/MM/YYYY') as ngay_dt FROM lich_su ORDER BY id DESC", conn)
+        df_lich_su = pd.read_sql("SELECT * FROM lich_su ORDER BY id DESC", conn)
         df_anh_xa = pd.read_sql("SELECT * FROM anh_xa", conn)
         df_chuan = pd.read_sql("SELECT * FROM ten_chuan", conn)
+        
+    if not df_lich_su.empty:
+        # Ép kiểu ngày an toàn, dòng nào lỗi định dạng sẽ không gây sập app
+        df_lich_su['ngay_dt'] = pd.to_datetime(df_lich_su['ngay_nhap_hang'], format='%d/%m/%Y', errors='coerce')
+    else:
+        df_lich_su['ngay_dt'] = pd.Series(dtype='datetime64[ns]')
+        
     return df_lich_su, df_anh_xa, df_chuan
 
 # Hàm xóa cache khi có thay đổi dữ liệu
@@ -38,7 +44,7 @@ def clear_app_cache():
     st.cache_data.clear()
 
 # Tải dữ liệu từ cache
-with st.spinner("Đang tải dữ liệu siêu tốc..."):
+with st.spinner("Đang tải dữ liệu..."):
     df_lich_su, df_anh_xa, df_chuan = load_data_from_db()
 
 st.title("📦 Phầm Mềm Quản Lý Nhập Hàng & Giá Cả")
@@ -78,7 +84,6 @@ with tab1:
             
             if st.button("💾 Lưu Hóa Đơn Vào Hệ Thống", type="primary"):
                 with st.spinner("Đang xử lý và lưu dữ liệu..."):
-                    # Map dữ liệu và ánh xạ tên chuẩn
                     anh_xa_dict = dict(zip(df_anh_xa['ten_npp'], df_anh_xa['ten_chuan']))
                     
                     rows_to_insert = []
@@ -124,7 +129,7 @@ with tab1:
         st.info("Vui lòng nhập Tên Nhà Phân Phối trước khi lưu.")
 
 # =========================================================
-# TAB 2: DANH SÁCH HÓA ĐƠN (TỐI ƯU TỐC ĐỘ HIỂN THỊ)
+# TAB 2: DANH SÁCH HÓA ĐƠN
 # =========================================================
 with tab2:
     st.subheader("📋 Danh Sách Hóa Đơn Đã Nhập")
@@ -241,9 +246,12 @@ with tab4:
             curr_ngay = parts[1].replace("Ngày: ", "").strip()
             
             curr_hd_df = df_lich_su_t4[(df_lich_su_t4['nha_phan_phoi'] == curr_npp) & (df_lich_su_t4['ngay_nhap_hang'] == curr_ngay)]
-            curr_dt = curr_hd_df['ngay_dt'].iloc[0]
+            curr_dt = curr_hd_df['ngay_dt'].iloc[0] if not curr_hd_df.empty else None
             
-            prev_hd_all = df_lich_su_t4[df_lich_su_t4['ngay_dt'] < curr_dt]
+            if curr_dt is not None:
+                prev_hd_all = df_lich_su_t4[df_lich_su_t4['ngay_dt'] < curr_dt]
+            else:
+                prev_hd_all = pd.DataFrame()
             
             result_rows = []
             for _, row in curr_hd_df.iterrows():
@@ -252,7 +260,7 @@ with tab4:
                 gia_thung_curr = row['don_gia_thung']
                 gia_le_curr = row['don_gia_le']
                 
-                prev_price_row = prev_hd_all[prev_hd_all['ten_sp_chuan'] == ten_chuan].sort_values(by='ngay_dt', ascending=False)
+                prev_price_row = prev_hd_all[prev_hd_all['ten_sp_chuan'] == ten_chuan].sort_values(by='ngay_dt', ascending=False) if not prev_hd_all.empty else pd.DataFrame()
                 
                 if not prev_price_row.empty:
                     gia_thung_prev = prev_price_row.iloc[0]['don_gia_thung']
@@ -298,7 +306,7 @@ with tab4:
             )
 
 # =========================================================
-# TAB 5: BÁO CÁO & BIỂU ĐỒ (TỐI ƯU TỐC ĐỘ VẼ CHART)
+# TAB 5: BÁO CÁO & BIỂU ĐỒ
 # =========================================================
 with tab5:
     st.subheader("📊 Báo Cáo & Biểu Đồ Nhập Hàng")
