@@ -9,7 +9,6 @@ from datetime import datetime
 # ---------------------------------------------------------
 st.set_page_config(page_title="App Nhập Hàng", layout="wide", initial_sidebar_state="expanded")
 
-# Kết nối Supabase tối ưu pool
 @st.cache_resource
 def get_database_engine():
     db_url = st.secrets["postgres"]["url"]
@@ -23,7 +22,6 @@ def get_database_engine():
 
 engine = get_database_engine()
 
-# Tự động khởi tạo cấu trúc bảng nếu chưa tồn tại
 def init_db():
     with engine.begin() as conn:
         conn.execute(text("""
@@ -55,10 +53,8 @@ def init_db():
             );
         """))
 
-# Gọi khởi tạo bảng khi chạy app
 init_db()
 
-# Cache đọc dữ liệu an toàn (Đã dùng text() để sửa triệt để lỗi DatabaseError)
 @st.cache_data(ttl=600, show_spinner=False)
 def load_data_from_db():
     with engine.connect() as conn:
@@ -66,18 +62,21 @@ def load_data_from_db():
         df_anh_xa = pd.read_sql(text("SELECT * FROM anh_xa"), conn)
         df_chuan = pd.read_sql(text("SELECT * FROM ten_chuan"), conn)
         
-    if not df_lich_su.empty:
+    # Chuẩn hóa tên cột về chữ thường để tránh lỗi KeyError
+    df_lich_su.columns = [c.lower() for c in df_lich_su.columns]
+    df_anh_xa.columns = [c.lower() for c in df_anh_xa.columns]
+    df_chuan.columns = [c.lower() for c in df_chuan.columns]
+
+    if not df_lich_su.empty and 'ngay_nhap_hang' in df_lich_su.columns:
         df_lich_su['ngay_dt'] = pd.to_datetime(df_lich_su['ngay_nhap_hang'], format='%d/%m/%Y', errors='coerce')
     else:
         df_lich_su['ngay_dt'] = pd.Series(dtype='datetime64[ns]')
         
     return df_lich_su, df_anh_xa, df_chuan
 
-# Hàm xóa cache khi có thay đổi dữ liệu
 def clear_app_cache():
     st.cache_data.clear()
 
-# Tải dữ liệu từ cache
 with st.spinner("Đang tải dữ liệu..."):
     df_lich_su, df_anh_xa, df_chuan = load_data_from_db()
 
@@ -118,7 +117,7 @@ with tab1:
             
             if st.button("💾 Lưu Hóa Đơn Vào Hệ Thống", type="primary"):
                 with st.spinner("Đang xử lý và lưu dữ liệu..."):
-                    anh_xa_dict = dict(zip(df_anh_xa['ten_npp'], df_anh_xa['ten_chuan']))
+                    anh_xa_dict = dict(zip(df_anh_xa['ten_npp'], df_anh_xa['ten_chuan'])) if not df_anh_xa.empty else {}
                     
                     rows_to_insert = []
                     for idx, row in df_upload.iterrows():
@@ -168,7 +167,7 @@ with tab1:
 with tab2:
     st.subheader("📋 Danh Sách Hóa Đơn Đã Nhập")
     
-    if not df_lich_su.empty:
+    if not df_lich_su.empty and 'nha_phan_phoi' in df_lich_su.columns:
         df_lich_su_temp = df_lich_su.copy()
         
         c_filter1, c_filter2 = st.columns([2, 2])
@@ -231,11 +230,11 @@ with tab3:
                 
     with col_t2:
         st.markdown("##### 2. Khớp Tên NPP với Tên Chuẩn")
-        if not df_lich_su.empty:
+        if not df_lich_su.empty and 'ten_sp_npp' in df_lich_su.columns:
             ds_ten_npp_chua_ax = list(df_lich_su['ten_sp_npp'].unique())
             ten_npp_selected = st.selectbox("Chọn tên sản phẩm NPP:", ds_ten_npp_chua_ax)
             
-            ds_chuan = list(df_chuan['ten_chuan'].unique()) if not df_chuan.empty else []
+            ds_chuan = list(df_chuan['ten_chuan'].unique()) if not df_chuan.empty and 'ten_chuan' in df_chuan.columns else []
             ten_chuan_selected = st.selectbox("Chọn Tên Chuẩn tương ứng:", ds_chuan)
             
             if st.button("Lưu Ánh Xạ"):
@@ -264,7 +263,7 @@ with tab3:
 with tab4:
     st.subheader("🔍 Chi Tiết & So Sánh Giá Hóa Đơn Gần Nhất")
     
-    if not df_lich_su.empty:
+    if not df_lich_su.empty and 'nha_phan_phoi' in df_lich_su.columns:
         df_lich_su_t4 = df_lich_su.copy()
         
         df_hd_list = df_lich_su_t4[['nha_phan_phoi', 'ngay_nhap_hang', 'ngay_dt']].drop_duplicates().sort_values(by='ngay_dt', ascending=False)
@@ -343,7 +342,7 @@ with tab4:
 with tab5:
     st.subheader("📊 Báo Cáo & Biểu Đồ Nhập Hàng")
     
-    if not df_lich_su.empty:
+    if not df_lich_su.empty and 'ngay_dt' in df_lich_su.columns:
         df_bc = df_lich_su.copy()
         time_option = st.selectbox("Chọn khoảng thời gian báo cáo:", ["Tháng này", "Tất cả thời gian"])
         
