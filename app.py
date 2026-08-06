@@ -16,23 +16,57 @@ def get_database_engine():
     return create_engine(
         db_url, 
         pool_pre_ping=True, 
-        pool_size=15, 
-        max_overflow=25,
+        pool_size=10, 
+        max_overflow=20,
         pool_recycle=300
     )
 
 engine = get_database_engine()
 
-# Cache đọc dữ liệu an toàn: Chuyển kiểu ngày bằng pandas (tránh lỗi TO_DATE của SQL)
+# Tự động khởi tạo cấu trúc bảng nếu chưa tồn tại
+def init_db():
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS ten_chuan (
+                id SERIAL PRIMARY KEY,
+                ten_chuan TEXT UNIQUE NOT NULL
+            );
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS anh_xa (
+                id SERIAL PRIMARY KEY,
+                ten_npp TEXT UNIQUE NOT NULL,
+                ten_chuan TEXT NOT NULL
+            );
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS lich_su (
+                id SERIAL PRIMARY KEY,
+                nha_phan_phoi TEXT,
+                so_hoa_don TEXT,
+                ngay_nhap_hang TEXT,
+                ten_sp_npp TEXT,
+                ten_sp_chuan TEXT,
+                quy_cach NUMERIC,
+                so_luong_thung NUMERIC,
+                don_gia_thung NUMERIC,
+                don_gia_le NUMERIC,
+                tong_tien NUMERIC
+            );
+        """))
+
+# Gọi khởi tạo bảng khi chạy app
+init_db()
+
+# Cache đọc dữ liệu an toàn (Đã dùng text() để sửa triệt để lỗi DatabaseError)
 @st.cache_data(ttl=600, show_spinner=False)
 def load_data_from_db():
     with engine.connect() as conn:
-        df_lich_su = pd.read_sql("SELECT * FROM lich_su ORDER BY id DESC", conn)
-        df_anh_xa = pd.read_sql("SELECT * FROM anh_xa", conn)
-        df_chuan = pd.read_sql("SELECT * FROM ten_chuan", conn)
+        df_lich_su = pd.read_sql(text("SELECT * FROM lich_su ORDER BY id DESC"), conn)
+        df_anh_xa = pd.read_sql(text("SELECT * FROM anh_xa"), conn)
+        df_chuan = pd.read_sql(text("SELECT * FROM ten_chuan"), conn)
         
     if not df_lich_su.empty:
-        # Ép kiểu ngày an toàn, dòng nào lỗi định dạng sẽ không gây sập app
         df_lich_su['ngay_dt'] = pd.to_datetime(df_lich_su['ngay_nhap_hang'], format='%d/%m/%Y', errors='coerce')
     else:
         df_lich_su['ngay_dt'] = pd.Series(dtype='datetime64[ns]')
@@ -189,9 +223,8 @@ with tab3:
         ten_chuan_moi = st.text_input("Nhập tên sản phẩm chuẩn mới:")
         if st.button("Thêm Tên Chuẩn"):
             if ten_chuan_moi.strip():
-                with engine.connect() as conn:
+                with engine.begin() as conn:
                     conn.execute(text("INSERT INTO ten_chuan (ten_chuan) VALUES (:t) ON CONFLICT DO NOTHING"), {"t": ten_chuan_moi.strip()})
-                    conn.commit()
                 clear_app_cache()
                 st.success(f"Đã thêm tên chuẩn: {ten_chuan_moi}")
                 st.rerun()
@@ -207,7 +240,7 @@ with tab3:
             
             if st.button("Lưu Ánh Xạ"):
                 if ten_npp_selected and ten_chuan_selected:
-                    with engine.connect() as conn:
+                    with engine.begin() as conn:
                         conn.execute(
                             text("INSERT INTO anh_xa (ten_npp, ten_chuan) VALUES (:n, :c) ON CONFLICT (ten_npp) DO UPDATE SET ten_chuan = :c"),
                             {"n": ten_npp_selected, "c": ten_chuan_selected}
@@ -216,7 +249,6 @@ with tab3:
                             text("UPDATE lich_su SET ten_sp_chuan = :c WHERE ten_sp_npp = :n"),
                             {"n": ten_npp_selected, "c": ten_chuan_selected}
                         )
-                        conn.commit()
                     clear_app_cache()
                     st.success("Đã lưu ánh xạ thành công!")
                     st.rerun()
@@ -227,7 +259,7 @@ with tab3:
         st.dataframe(df_anh_xa, use_container_width=True)
 
 # =========================================================
-# TAB 4: CHI TIẾT & SO SÁNH GIÁ (CHỈ HIỂN THỊ TÊN NPP)
+# TAB 4: CHI TIẾT & SO SÁNH GIÁ
 # =========================================================
 with tab4:
     st.subheader("🔍 Chi Tiết & So Sánh Giá Hóa Đơn Gần Nhất")
