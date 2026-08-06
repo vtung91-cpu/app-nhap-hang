@@ -20,7 +20,6 @@ except Exception as e:
 # TỰ ĐỘNG KHỞI TẠO BẢNG DỮ LIỆU TRÊN SUPABASE (NẾU CHƯA CÓ)
 def init_db():
     with engine.begin() as conn:
-        # Bảng Lịch sử nhập hàng
         conn.execute(text('''
             CREATE TABLE IF NOT EXISTS lich_su (
                 id SERIAL PRIMARY KEY,
@@ -35,7 +34,6 @@ def init_db():
                 gia_nhap_le DOUBLE PRECISION
             );
         '''))
-        # Bảng Ánh xạ tên
         conn.execute(text('''
             CREATE TABLE IF NOT EXISTS anh_xa (
                 ten_phu TEXT PRIMARY KEY,
@@ -45,13 +43,13 @@ def init_db():
 
 init_db()
 
-# Hàm làm sạch tên (viết hoa chữ cái đầu, xóa khoảng trắng thừa)
+# Hàm làm sạch tên
 def clean_name(name_str):
     if not isinstance(name_str, str) or not name_str.strip():
         return "Chưa Rõ"
     return " ".join(name_str.strip().split()).title()
 
-# Hàm định dạng tiền tệ (VD: 100.000)
+# Hàm định dạng tiền tệ
 def format_money(val):
     try:
         val = float(val)
@@ -61,7 +59,7 @@ def format_money(val):
     except:
         return "0"
 
-# Hàm chuẩn hóa chuỗi Ngày / Tháng / Năm đồng nhất (VD: 26/07/2026)
+# Hàm chuẩn hóa chuỗi Ngày / Tháng / Năm
 def format_date_str(date_str):
     if not date_str or str(date_str) == "nan":
         return ""
@@ -73,7 +71,8 @@ def format_date_str(date_str):
         pass
     return str(date_str).split(" ")[0]
 
-# Lấy dữ liệu từ Supabase Database
+# TỐI ƯU TỐC ĐỘ 1: DÙNG CACHE TẢI DỮ LIỆU TỪ SUPABASE (CHỈ TẢI LẠI KHI CÓ DỮ LIỆU MỚI)
+@st.cache_data(ttl=300)
 def load_data():
     with engine.connect() as conn:
         df_ls = pd.read_sql_query(text("SELECT * FROM lich_su ORDER BY id ASC"), conn)
@@ -139,8 +138,15 @@ with tab1:
             if start_row != -1:
                 df_items = df_raw.iloc[start_row:].dropna(subset=[df_raw.columns[1]]).copy()
                 items_to_save = []
+                anh_xa_to_save = []
+                
                 st.write("---")
                 st.subheader("🔍 Khớp Tên & Cảnh Báo Giá")
+                
+                # Gom dữ liệu giá cũ để tìm kiếm nhanh trong bộ nhớ RAM
+                dict_gia_cu = {}
+                if not df_lich_su.empty:
+                    dict_gia_cu = df_lich_su.groupby("ten_sp_chuan")["gia_nhap_le"].last().to_dict()
                 
                 with st.form("form_khop_ten"):
                     for idx, row in df_items.iterrows():
@@ -155,19 +161,17 @@ with tab1:
                         
                         ten_chuan_default = map_anh_xa.get(clean_name(ten_phu), clean_name(ten_phu))
                         
-                        # CẢNH BÁO GIÁ LÊN / XUỐNG
+                        # CẢNH BÁO GIÁ LÊN / XUỐNG KHÔNG CẦN CHỌC DATABASE
                         canh_bao_str = ""
-                        if not df_lich_su.empty:
-                            df_cu = df_lich_su[df_lich_su["ten_sp_chuan"].str.lower() == ten_chuan_default.lower()]
-                            if not df_cu.empty:
-                                gia_cu_gan_nhat = float(df_cu.iloc[-1]["gia_nhap_le"])
-                                chenh_lech = gia_nhap_le - gia_cu_gan_nhat
-                                if chenh_lech > 0:
-                                    canh_bao_str = f" 🔴 **TĂNG {format_money(chenh_lech)}** *(Đợt trước: {format_money(gia_cu_gan_nhat)})*"
-                                elif chenh_lech < 0:
-                                    canh_bao_str = f" 🟢 **GIẢM {format_money(abs(chenh_lech))}** *(Đợt trước: {format_money(gia_cu_gan_nhat)})*"
-                                else:
-                                    canh_bao_str = " ⚪ **Không đổi**"
+                        gia_cu_gan_nhat = dict_gia_cu.get(ten_chuan_default)
+                        if gia_cu_gan_nhat is not None:
+                            chenh_lech = gia_nhap_le - gia_cu_gan_nhat
+                            if chenh_lech > 0:
+                                canh_bao_str = f" 🔴 **TĂNG {format_money(chenh_lech)}** *(Đợt trước: {format_money(gia_cu_gan_nhat)})*"
+                            elif chenh_lech < 0:
+                                canh_bao_str = f" 🟢 **GIẢM {format_money(abs(chenh_lech))}** *(Đợt trước: {format_money(gia_cu_gan_nhat)})*"
+                            else:
+                                canh_bao_str = " ⚪ **Không đổi**"
                         
                         st.markdown(f"**Tên NPP:** `{ten_phu}`")
                         st.markdown(f"Quy cách: {quy_cach:.0f} | Giá thùng: {format_money(don_gia_thung)} ➔ **Giá lẻ: {format_money(gia_nhap_le)}**{canh_bao_str}")
@@ -201,24 +205,29 @@ with tab1:
                             "don_gia_thung": don_gia_thung,
                             "gia_nhap_le": gia_nhap_le
                         })
+                        
+                        anh_xa_to_save.append({
+                            "ten_phu": clean_name(ten_phu),
+                            "ten_chuan": ten_chuan_user
+                        })
                     
                     submitted = st.form_submit_button("💾 LƯU DỮ LIỆU HÓA ĐƠN")
                     if submitted:
                         with engine.begin() as conn:
-                            # Lưu lịch sử
-                            for item in items_to_save:
-                                conn.execute(text('''
-                                    INSERT INTO lich_su (ngay_hd, so_hd, ten_ncc, ten_phu_npp, ten_sp_chuan, quy_cach, so_luong, don_gia_thung, gia_nhap_le)
-                                    VALUES (:ngay_hd, :so_hd, :ten_ncc, :ten_phu_npp, :ten_sp_chuan, :quy_cach, :so_luong, :don_gia_thung, :gia_nhap_le)
-                                '''), item)
-                                
-                                # Lưu ánh xạ tên
-                                conn.execute(text('''
-                                    INSERT INTO anh_xa (ten_phu, ten_chuan)
-                                    VALUES (:ten_phu, :ten_chuan)
-                                    ON CONFLICT (ten_phu) DO UPDATE SET ten_chuan = EXCLUDED.ten_chuan
-                                '''), {"ten_phu": clean_name(item["ten_phu_npp"]), "ten_chuan": item["ten_sp_chuan"]})
+                            # TỐI ƯU TỐC ĐỘ 2: BATCH INSERT - GỬI TOÀN BỘ TRONG 1 LẦN DUY NHẤT
+                            conn.execute(text('''
+                                INSERT INTO lich_su (ngay_hd, so_hd, ten_ncc, ten_phu_npp, ten_sp_chuan, quy_cach, so_luong, don_gia_thung, gia_nhap_le)
+                                VALUES (:ngay_hd, :so_hd, :ten_ncc, :ten_phu_npp, :ten_sp_chuan, :quy_cach, :so_luong, :don_gia_thung, :gia_nhap_le)
+                            '''), items_to_save)
+                            
+                            conn.execute(text('''
+                                INSERT INTO anh_xa (ten_phu, ten_chuan)
+                                VALUES (:ten_phu, :ten_chuan)
+                                ON CONFLICT (ten_phu) DO UPDATE SET ten_chuan = EXCLUDED.ten_chuan
+                            '''), anh_xa_to_save)
                         
+                        # Xóa cache để app tải dữ liệu mới nhất
+                        st.cache_data.clear()
                         st.balloons()
                         st.success("✅ ĐÃ LƯU THÀNH CÔNG VÀO SUPABASE!")
                         st.rerun()
@@ -309,12 +318,12 @@ with tab2:
                 
                 c_btn1, c_btn2 = st.columns(2)
                 
-                # SỬA SẢN PHẨM TRONG HÓA ĐƠN
                 with c_btn1:
                     with st.popover("✏️ Sửa chi tiết HD"):
                         st.write("Chỉnh sửa Tên chuẩn / Quy cách:")
                         with st.form(f"form_edit_{idx}"):
                             edited_items = []
+                            ax_items = []
                             for sub_idx, sub_row in df_hd_sub.iterrows():
                                 item_id = int(sub_row["id"])
                                 st.caption(f"📌 **{sub_row['ten_phu_npp']}**")
@@ -331,12 +340,16 @@ with tab2:
                                 else:
                                     final_tc = chon_tc
                                     
+                                tc_clean = clean_name(final_tc)
                                 edited_items.append({
                                     "id": item_id, 
                                     "quy_cach": new_qc, 
-                                    "ten_sp_chuan": clean_name(final_tc), 
-                                    "don_gia_thung": sub_row["don_gia_thung"], 
-                                    "ten_phu_npp": clean_name(sub_row["ten_phu_npp"])
+                                    "ten_sp_chuan": tc_clean, 
+                                    "gia_nhap_le": sub_row["don_gia_thung"] / new_qc
+                                })
+                                ax_items.append({
+                                    "ten_phu": clean_name(sub_row["ten_phu_npp"]), 
+                                    "ten_chuan": tc_clean
                                 })
                                 st.write("---")
                             
@@ -344,34 +357,29 @@ with tab2:
                             if btn_save_edit:
                                 with engine.begin() as conn:
                                     for item in edited_items:
-                                        gia_nhap_le_moi = item["don_gia_thung"] / item["quy_cach"]
                                         conn.execute(text('''
                                             UPDATE lich_su 
                                             SET quy_cach = :quy_cach, ten_sp_chuan = :ten_sp_chuan, gia_nhap_le = :gia_nhap_le
                                             WHERE id = :id
-                                        '''), {
-                                            "quy_cach": item["quy_cach"],
-                                            "ten_sp_chuan": item["ten_sp_chuan"],
-                                            "gia_nhap_le": gia_nhap_le_moi,
-                                            "id": item["id"]
-                                        })
-                                        
-                                        conn.execute(text('''
-                                            INSERT INTO anh_xa (ten_phu, ten_chuan)
-                                            VALUES (:ten_phu, :ten_chuan)
-                                            ON CONFLICT (ten_phu) DO UPDATE SET ten_chuan = EXCLUDED.ten_chuan
-                                        '''), {"ten_phu": item["ten_phu_npp"], "ten_chuan": item["ten_sp_chuan"]})
+                                        '''), item)
+                                    
+                                    conn.execute(text('''
+                                        INSERT INTO anh_xa (ten_phu, ten_chuan)
+                                        VALUES (:ten_phu, :ten_chuan)
+                                        ON CONFLICT (ten_phu) DO UPDATE SET ten_chuan = EXCLUDED.ten_chuan
+                                    '''), ax_items)
                                 
+                                st.cache_data.clear()
                                 st.success("✅ Đã cập nhật xong!")
                                 st.rerun()
 
-                # XÓA HÓA ĐƠN
                 with c_btn2:
                     with st.popover("🗑 Xóa Hóa Đơn"):
                         st.warning(f"Bạn có chắc muốn XÓA hẳn HD **{so_hd_cur}**?")
                         if st.button("🔴 Xác nhận Xóa", key=f"btn_del_hd_{idx}"):
                             with engine.begin() as conn:
                                 conn.execute(text("DELETE FROM lich_su WHERE so_hd = :so_hd AND ten_ncc = :ten_ncc"), {"so_hd": so_hd_cur, "ten_ncc": ncc_cur})
+                            st.cache_data.clear()
                             st.success(f"🗑 Đã xóa toàn bộ hóa đơn {so_hd_cur}!")
                             st.rerun()
 
@@ -402,6 +410,7 @@ with tab3:
                     with engine.begin() as conn:
                         conn.execute(text("UPDATE lich_su SET ten_sp_chuan = :ten_moi WHERE ten_sp_chuan = :ten_cu"), {"ten_moi": ten_moi_clean, "ten_cu": sp_chon_ql})
                         conn.execute(text("UPDATE anh_xa SET ten_chuan = :ten_moi WHERE ten_chuan = :ten_cu"), {"ten_moi": ten_moi_clean, "ten_cu": sp_chon_ql})
+                    st.cache_data.clear()
                     st.success(f"✅ Đã đổi tên '{sp_chon_ql}' ➔ '{ten_moi_clean}'!")
                     st.rerun()
         
@@ -412,6 +421,7 @@ with tab3:
                 with engine.begin() as conn:
                     conn.execute(text("DELETE FROM anh_xa WHERE ten_chuan = :ten_cu"), {"ten_cu": sp_chon_ql})
                     conn.execute(text("UPDATE lich_su SET ten_sp_chuan = ten_phu_npp WHERE ten_sp_chuan = :ten_cu"), {"ten_cu": sp_chon_ql})
+                st.cache_data.clear()
                 st.success(f"🗑 Đã xóa hoàn toàn tên '{sp_chon_ql}'!")
                 st.rerun()
     else:
@@ -432,7 +442,7 @@ with tab4:
         st.info("Lịch sử trống.")
 
 # ---------------------------------------------------------
-# TAB 5: BIỂU ĐỒ & THỐNG KÊ (LOGIC GOM THỜI GIAN THÔNG MINH)
+# TAB 5: BIỂU ĐỒ & THỐNG KÊ
 # ---------------------------------------------------------
 with tab5:
     st.subheader("📊 Báo Cáo & Biểu Đồ Nhập Hàng")
@@ -440,8 +450,6 @@ with tab5:
     if not df_lich_su.empty:
         df_stat = df_lich_su.copy()
         df_stat["Tong_Tien_Dong"] = df_stat["so_luong"] * df_stat["don_gia_thung"]
-        
-        # Chuyển chuỗi Ngày về kiểu Date chuẩn
         df_stat["Date_Obj"] = pd.to_datetime(df_stat["ngay_hd"], dayfirst=True, errors='coerce')
         df_stat = df_stat.dropna(subset=["Date_Obj"])
         
@@ -453,7 +461,7 @@ with tab5:
                 ["Tháng này", "Tháng trước", "Năm nay", "Năm trước", "Tùy chỉnh ngày"]
             )
             
-            group_mode = "day" # Mặc định nhóm theo Ngày
+            group_mode = "day"
             
             if luat_chon == "Tháng này":
                 start_d = datetime(now.year, now.month, 1)
@@ -472,7 +480,7 @@ with tab5:
                 start_d = datetime(now.year - 1, 1, 1)
                 end_d = datetime(now.year - 1, 12, 31)
                 group_mode = "month"
-            else: # Tùy chỉnh ngày
+            else:
                 col_d1, col_d2 = st.columns(2)
                 with col_d1:
                     start_input = st.date_input("Từ ngày:", datetime(now.year, now.month, 1))
@@ -493,7 +501,6 @@ with tab5:
             st.write("---")
 
             if not df_filtered.empty:
-                # 1. METRICS TỔNG QUAN
                 tong_chi_phi = df_filtered["Tong_Tien_Dong"].sum()
                 tong_hd = df_filtered["so_hd"].nunique()
                 tong_mon = len(df_filtered)
@@ -505,7 +512,6 @@ with tab5:
 
                 st.write("---")
 
-                # 2. BIỂU ĐỒ SỐ TIỀN NHẬP THEO THỜI GIAN
                 if group_mode == "day":
                     st.markdown("##### 📈 Biểu Đồ Nhập Hàng Theo Từng Ngày")
                     df_filtered["Time_Key"] = df_filtered["Date_Obj"].dt.strftime("%d/%m/%Y")
@@ -533,7 +539,6 @@ with tab5:
                 fig_time.update_layout(xaxis_title=x_label, yaxis_title="Số tiền (VNĐ)", height=420)
                 st.plotly_chart(fig_time, use_container_width=True)
 
-                # 3. BIỂU ĐỒ SỐ TIỀN NHẬP THEO NHÀ CUNG CẤP (NPP)
                 st.markdown("##### 🏢 Tỷ Trọng Nhập Hàng Theo Nhà Cung Cấp (NPP)")
                 df_by_ncc = df_filtered.groupby("ten_ncc")["Tong_Tien_Dong"].sum().reset_index().sort_values(by="Tong_Tien_Dong", ascending=False)
                 df_by_ncc.columns = ["Nhà Cung Cấp", "Tổng Tiền (Đồng)"]
