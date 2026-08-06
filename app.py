@@ -123,9 +123,12 @@ with tab1:
             ten_ncc = clean_name(ten_ncc_raw)
             
             ngay_hd_raw = str(df_raw.iloc[3, 1]) if pd.notna(df_raw.iloc[3, 1]) else ""
-            ngay_hd = format_date_str(ngay_hd_raw)
+            ngay_hd_excel = format_date_str(ngay_hd_raw)
             
             so_hd = str(df_raw.iloc[4, 1]) if pd.notna(df_raw.iloc[4, 1]) else ""
+            
+            ngay_hd_input = st.text_input("📅 Ngày hóa đơn (Sửa hoặc nhập lại nếu cần):", value=ngay_hd_excel)
+            ngay_hd = format_date_str(ngay_hd_input)
             
             st.success(f"📌 **NCC:** {ten_ncc} | **Số HD:** {so_hd} | **Ngày:** {ngay_hd}")
             
