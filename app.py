@@ -4,9 +4,6 @@ from sqlalchemy import create_engine, text
 import plotly.express as px
 from datetime import datetime
 
-# ---------------------------------------------------------
-# 1. CẤU HÌNH TRANG VÀ KẾT NỐI DATABASE
-# ---------------------------------------------------------
 st.set_page_config(page_title="App Nhập Hàng", layout="wide", initial_sidebar_state="expanded")
 
 @st.cache_resource
@@ -22,7 +19,13 @@ def get_database_engine():
 
 engine = get_database_engine()
 
-# Đọc dữ liệu an toàn từ Database (Giữ nguyên toàn bộ dữ liệu cũ)
+# Hàm tự động tìm cột linh hoạt
+def find_col(df, possible_names):
+    for col in df.columns:
+        if str(col).strip().lower() in [p.lower() for p in possible_names]:
+            return col
+    return None
+
 @st.cache_data(ttl=600, show_spinner=False)
 def load_data_from_db():
     with engine.connect() as conn:
@@ -41,23 +44,43 @@ def load_data_from_db():
         except Exception:
             df_chuan = pd.DataFrame()
         
-    # Chuyển toàn bộ tên cột về chữ thường để tránh lỗi lệch tên cột giữa DB và Pandas
+    # Chuẩn hóa linh hoạt các tên cột của lich_su
     if not df_lich_su.empty:
-        df_lich_su.columns = [str(c).lower() for c in df_lich_su.columns]
-        
-        # Tìm cột chứa thông tin ngày nhập hàng
-        col_date = next((c for c in ['ngay_nhap_hang', 'ngay_nhap', 'ngay'] if c in df_lich_su.columns), None)
-        if col_date:
-            df_lich_su['ngay_nhap_hang'] = df_lich_su[col_date]
+        col_npp = find_col(df_lich_su, ['nha_phan_phoi', 'npp', 'nhaphanphoi'])
+        col_ngay = find_col(df_lich_su, ['ngay_nhap_hang', 'ngay_nhap', 'ngay'])
+        col_sp_npp = find_col(df_lich_su, ['ten_sp_npp', 'ten_npp', 'ten_san_pham'])
+        col_sp_chuan = find_col(df_lich_su, ['ten_sp_chuan', 'ten_chuan'])
+        col_qc = find_col(df_lich_su, ['quy_cach', 'quycach'])
+        col_sl = find_col(df_lich_su, ['so_luong_thung', 'so_luong', 'sl'])
+        col_gia_thung = find_col(df_lich_su, ['don_gia_thung', 'don_gia', 'gia_thung'])
+        col_gia_le = find_col(df_lich_su, ['don_gia_le', 'gia_le'])
+        col_tong = find_col(df_lich_su, ['tong_tien', 'thanhtien', 'thanh_tien'])
+
+        # Gán lại chuẩn hóa
+        if col_npp: df_lich_su['nha_phan_phoi'] = df_lich_su[col_npp]
+        if col_ngay: df_lich_su['ngay_nhap_hang'] = df_lich_su[col_ngay]
+        if col_sp_npp: df_lich_su['ten_sp_npp'] = df_lich_su[col_sp_npp]
+        if col_sp_chuan: df_lich_su['ten_sp_chuan'] = df_lich_su[col_sp_chuan]
+        if col_qc: df_lich_su['quy_cach'] = df_lich_su[col_qc]
+        if col_sl: df_lich_su['so_luong_thung'] = df_lich_su[col_sl]
+        if col_gia_thung: df_lich_su['don_gia_thung'] = df_lich_su[col_gia_thung]
+        if col_gia_le: df_lich_su['don_gia_le'] = df_lich_su[col_gia_le]
+        if col_tong: df_lich_su['tong_tien'] = df_lich_su[col_tong]
+
+        if 'ngay_nhap_hang' in df_lich_su.columns:
             df_lich_su['ngay_dt'] = pd.to_datetime(df_lich_su['ngay_nhap_hang'], format='%d/%m/%Y', errors='coerce')
         else:
             df_lich_su['ngay_dt'] = pd.NaT
 
     if not df_anh_xa.empty:
-        df_anh_xa.columns = [str(c).lower() for c in df_anh_xa.columns]
+        col_anx_npp = find_col(df_anh_xa, ['ten_npp', 'ten_sp_npp'])
+        col_anx_chuan = find_col(df_anh_xa, ['ten_chuan', 'ten_sp_chuan'])
+        if col_anx_npp: df_anh_xa['ten_npp'] = df_anh_xa[col_anx_npp]
+        if col_anx_chuan: df_anh_xa['ten_chuan'] = df_anh_xa[col_anx_chuan]
 
     if not df_chuan.empty:
-        df_chuan.columns = [str(c).lower() for c in df_chuan.columns]
+        col_c = find_col(df_chuan, ['ten_chuan', 'ten_sp_chuan'])
+        if col_c: df_chuan['ten_chuan'] = df_chuan[col_c]
         
     return df_lich_su, df_anh_xa, df_chuan
 
@@ -69,9 +92,7 @@ with st.spinner("Đang tải dữ liệu từ máy chủ..."):
 
 st.title("📦 Phần Mềm Quản Lý Nhập Hàng & Giá Cả")
 
-# ---------------------------------------------------------
-# 2. KHỞI TẠO CÁC TAB
-# ---------------------------------------------------------
+# Tạo các Tab
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📥 Nhập Hóa Đơn", 
     "📋 Danh Sách Hóa Đơn", 
